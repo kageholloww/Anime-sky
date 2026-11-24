@@ -153,9 +153,9 @@ function MobileAnimeCard({ anime, onClickMore }: { anime: AnimeCardType; onClick
   const epNum = anime.episodes || anime.total_episodes || (anime.year ? `${(parseInt(anime.id.slice(-1) || "1", 16) % 12) + 1}` : "8");
 
   return (
-    <div className="w-[145px] shrink-0 group select-none flex flex-col">
+    <div className="w-[135px] shrink-0 sm:w-auto group select-none flex flex-col snap-start">
       <Link href={`/anime/${anime.id}`} className="block relative">
-        <div className="h-[212px] w-full rounded-2xl overflow-hidden relative shadow-lg bg-[#0d1020] border border-white/5 group-hover:border-purple-500/50 transition-all duration-300">
+        <div className="h-[195px] sm:h-[185px] md:h-[210px] w-full rounded-2xl overflow-hidden relative shadow-lg bg-[#0d1020] border border-white/5 group-hover:border-purple-500/50 transition-all duration-300">
           {/* Green Status Badge */}
           <div className="absolute top-2.5 right-2.5 z-10">
             <span className="bg-[#22c55e] text-white text-[10px] font-bold px-2 py-0.5 rounded-md shadow-md backdrop-blur-sm">
@@ -226,8 +226,8 @@ export default function Home() {
   const [quickActionAnime, setQuickActionAnime] = useState<AnimeCardType | null>(null);
 
   // Queries
-  const latest = trpc.anime.latest.useQuery({ limit: 20 });
-  const popular = trpc.anime.latest.useQuery({ genreId: "1", limit: 20 });
+  const latest = trpc.anime.latest.useQuery({ limit: 36 });
+  const popular = trpc.anime.latest.useQuery({ genreId: "1", limit: 24 });
   const searchResults = trpc.anime.search.useQuery(
     { keyword: searchQuery.trim(), limit: 24 },
     { enabled: searchQuery.trim().length > 1 }
@@ -255,6 +255,26 @@ export default function Home() {
       })
     );
   }, [latest.data, selectedGenreName]);
+
+  // Chunk latest anime into horizontal rows of 6 ("6 أنميات في صفة وحدة بالعرض")
+  const latestRowsOf6 = useMemo(() => {
+    const list = displayLatest;
+    const rows: AnimeCardType[][] = [];
+    for (let i = 0; i < list.length; i += 6) {
+      rows.push(list.slice(i, i + 6));
+    }
+    return rows;
+  }, [displayLatest]);
+
+  // Chunk popular anime into horizontal rows of 6
+  const popularRowsOf6 = useMemo(() => {
+    const list = popular.data ?? [];
+    const rows: AnimeCardType[][] = [];
+    for (let i = 0; i < list.length; i += 6) {
+      rows.push(list.slice(i, i + 6));
+    }
+    return rows;
+  }, [popular.data]);
 
   const handleSelectGenre = (genreName: string) => {
     if (selectedGenreName === genreName) {
@@ -370,54 +390,69 @@ export default function Home() {
         </section>
 
         {/* ─────────────────────────────────────────────────────────────
-            SECTION 1: الإصدارات الحديثة (LATEST RELEASES)
+            SECTION 1: الإصدارات الحديثة (ROWS OF 6 ANIME HORIZONTALLY)
             ───────────────────────────────────────────────────────────── */}
-        <section id="releases-section" className="pt-2 pb-5">
-          <div className="px-4 mb-3 flex items-center justify-between">
-            <h2 className="text-base sm:text-lg font-bold text-white flex items-center gap-2">
-              <span>الإصدارات الحديثة</span>
-              {selectedGenreName ? (
-                <span className="text-xs font-normal text-purple-400 bg-purple-500/10 px-2 py-0.5 rounded-md border border-purple-500/20">
-                  {selectedGenreName}
-                  <button onClick={() => setSelectedGenreName(null)} className="mr-1 text-gray-400 hover:text-white">✕</button>
-                </span>
-              ) : null}
-            </h2>
-            <button
-              type="button"
-              onClick={() => {
-                setSearchQuery("");
-                setSearchOpen(true);
-              }}
-              className="text-xs font-semibold text-gray-400 hover:text-white transition-colors"
-            >
-              عرض المزيد
-            </button>
-          </div>
-
-          {/* Horizontal Scroll Shelf */}
+        <div id="releases-section" className="pt-2">
           {latest.isLoading ? (
-            <div className="flex gap-3 px-4 overflow-x-hidden">
-              {[1, 2, 3, 4].map((n) => (
-                <div key={n} className="w-[145px] shrink-0">
-                  <div className="h-[212px] rounded-2xl bg-white/5 animate-pulse" />
-                  <div className="h-4 bg-white/5 rounded mt-2 w-3/4 animate-pulse" />
-                  <div className="h-3 bg-white/5 rounded mt-1.5 w-1/2 animate-pulse" />
-                </div>
-              ))}
-            </div>
+            <section className="pt-2 pb-5">
+              <div className="px-4 mb-3 flex items-center justify-between">
+                <div className="h-5 bg-white/10 rounded w-44 animate-pulse" />
+              </div>
+              <div className="flex gap-3 px-4 overflow-x-hidden">
+                {[1, 2, 3, 4, 5, 6].map((n) => (
+                  <div key={n} className="w-[135px] shrink-0">
+                    <div className="h-[195px] rounded-2xl bg-white/5 animate-pulse" />
+                    <div className="h-3.5 bg-white/5 rounded mt-2 w-3/4 animate-pulse" />
+                    <div className="h-3 bg-white/5 rounded mt-1.5 w-1/2 animate-pulse" />
+                  </div>
+                ))}
+              </div>
+            </section>
           ) : (
-            <div className="flex gap-3.5 px-4 overflow-x-auto no-scrollbar scroll-smooth snap-x snap-mandatory">
-              {displayLatest.map((anime) => (
-                <MobileAnimeCard
-                  key={anime.id}
-                  anime={anime}
-                  onClickMore={(a) => setQuickActionAnime(a)}
-                />
-              ))}
-            </div>
+            latestRowsOf6.map((row, rowIdx) => {
+              const rowTitles = [
+                "الإصدارات الحديثة",
+                "أنميات مستمرة",
+                "أحدث الحلقات المضافة",
+                "إصدارات الموسم",
+                "أنميات مختارة",
+                "قائمة الأنمي الجديدة",
+              ];
+              const title = rowTitles[rowIdx] || `قائمة الأنمي - الصف ${rowIdx + 1}`;
+
+              return (
+                <section key={`latest-row-${rowIdx}`} className="pt-2 pb-5">
+                  <div className="px-4 mb-2.5 flex items-center justify-between">
+                    <h2 className="text-sm sm:text-base font-bold text-white flex items-center gap-2">
+                      <span>{title}</span>
+                      {rowIdx === 0 && selectedGenreName ? (
+                        <span className="text-xs font-normal text-purple-400 bg-purple-500/10 px-2 py-0.5 rounded-md border border-purple-500/20">
+                          {selectedGenreName}
+                          <button onClick={() => setSelectedGenreName(null)} className="mr-1 text-gray-400 hover:text-white">✕</button>
+                        </span>
+                      ) : null}
+                      <span className="text-[10px] font-semibold text-purple-300 bg-purple-500/15 px-2 py-0.5 rounded-full border border-purple-500/25">
+                        {row.length} أنميات بالعرض
+                      </span>
+                    </h2>
+                    <span className="text-[11px] font-medium text-gray-400">صف {rowIdx + 1}</span>
+                  </div>
+
+                  {/* Horizontal row of 6 anime */}
+                  <div className="flex gap-3 px-4 overflow-x-auto no-scrollbar scroll-smooth snap-x snap-mandatory sm:grid sm:grid-cols-6 sm:gap-3 sm:overflow-visible">
+                    {row.map((anime) => (
+                      <MobileAnimeCard
+                        key={anime.id}
+                        anime={anime}
+                        onClickMore={(a) => setQuickActionAnime(a)}
+                      />
+                    ))}
+                  </div>
+                </section>
+              );
+            })
           )}
-        </section>
+        </div>
 
         {/* ─────────────────────────────────────────────────────────────
             SECTION 2: الأنواع الشائعة (POPULAR GENRES)
@@ -454,7 +489,6 @@ export default function Home() {
                     alt={genre.name}
                     className="absolute -left-2 -bottom-2 h-[90px] w-auto object-contain pointer-events-none drop-shadow-lg opacity-95 group-hover:scale-110 transition-transform"
                     onError={(e) => {
-                      // Fallback if image blocked
                       (e.target as HTMLElement).style.display = "none";
                     }}
                   />
@@ -469,27 +503,44 @@ export default function Home() {
         </section>
 
         {/* ─────────────────────────────────────────────────────────────
-            SECTION 3: الأكثر شهرة ومتابعة (TOP PICKS)
+            SECTION 3: الأكثر شهرة ومتابعة (POPULAR ANIME IN ROWS OF 6)
             ───────────────────────────────────────────────────────────── */}
-        <section className="pt-1 pb-6">
-          <div className="px-4 mb-3 flex items-center justify-between">
-            <h2 className="text-base sm:text-lg font-bold text-white flex items-center gap-1.5">
-              <span>الأكثر شهرة ومتابعة</span>
-              <Sparkles size={16} className="text-purple-400" />
-            </h2>
-            <span className="text-xs text-gray-400">مميزة</span>
-          </div>
+        <div className="pt-1 pb-4">
+          {popularRowsOf6.map((row, rowIdx) => {
+            const rowTitles = [
+              "الأكثر شهرة ومتابعة",
+              "أنميات أسطورية ومميزة",
+              "الأعلى تقييماً وإعجاباً",
+              "ترشيحات الأسبوع",
+            ];
+            const title = rowTitles[rowIdx] || `أنميات مميزة - الصف ${rowIdx + 1}`;
 
-          <div className="flex gap-3.5 px-4 overflow-x-auto no-scrollbar scroll-smooth snap-x snap-mandatory">
-            {(popular.data ?? []).slice(0, 15).map((anime) => (
-              <MobileAnimeCard
-                key={`pop-${anime.id}`}
-                anime={anime}
-                onClickMore={(a) => setQuickActionAnime(a)}
-              />
-            ))}
-          </div>
-        </section>
+            return (
+              <section key={`pop-row-${rowIdx}`} className="pt-2 pb-5">
+                <div className="px-4 mb-2.5 flex items-center justify-between">
+                  <h2 className="text-sm sm:text-base font-bold text-white flex items-center gap-2">
+                    <span>{title}</span>
+                    <Sparkles size={14} className="text-purple-400" />
+                    <span className="text-[10px] font-semibold text-amber-300 bg-amber-500/15 px-2 py-0.5 rounded-full border border-amber-500/25">
+                      {row.length} أنميات بالعرض
+                    </span>
+                  </h2>
+                  <span className="text-[11px] font-medium text-gray-400">صف {rowIdx + 1}</span>
+                </div>
+
+                <div className="flex gap-3 px-4 overflow-x-auto no-scrollbar scroll-smooth snap-x snap-mandatory sm:grid sm:grid-cols-6 sm:gap-3 sm:overflow-visible">
+                  {row.map((anime) => (
+                    <MobileAnimeCard
+                      key={`pop-${anime.id}`}
+                      anime={anime}
+                      onClickMore={(a) => setQuickActionAnime(a)}
+                    />
+                  ))}
+                </div>
+              </section>
+            );
+          })}
+        </div>
       </main>
 
       {/* ─────────────────────────────────────────────────────────────

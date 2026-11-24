@@ -8,7 +8,14 @@ import type { EpisodeSource } from "../../../server/animeApi";
 
 function isNativeVideoUrl(url: string) {
   if (!url) return false;
-  return /\.(mp4|webm|m3u8|mkv)(\?|$)/i.test(url) || url.includes("/api/video/proxy");
+  return (
+    /\.(mp4|webm|m3u8|mkv)(\?|$)/i.test(url) ||
+    url.includes("/api/video/proxy") ||
+    url.includes("kawaii-anime.com") ||
+    url.includes("/video/") ||
+    url.includes("mp4upload") ||
+    url.includes("pixeldrain")
+  );
 }
 
 function providerClass(provider: string) {
@@ -75,7 +82,24 @@ export default function Watch() {
     return () => { cancelled = true; };
   }, [selected?.id, selected?.url, selected?.provider]);
 
-  const playableUrl = directUrl || (selected && (selected.direct || isNativeVideoUrl(selected.url)) ? selected.url : "");
+  const playableUrl = useMemo(() => {
+    if (directUrl) return directUrl;
+    if (!selected) return "";
+    const raw = selected.url || "";
+    if (raw.startsWith("/api/video/proxy")) return raw;
+    if (isNativeVideoUrl(raw) || selected.direct || selected.provider.includes("Kawaii") || selected.provider.includes("Direct")) {
+      return `/api/video/proxy?url=${encodeURIComponent(raw)}`;
+    }
+    return raw;
+  }, [directUrl, selected]);
+
+  const isNativeVideo = Boolean(
+    playableUrl && (
+      playableUrl.includes("/api/video/proxy") ||
+      isNativeVideoUrl(playableUrl) ||
+      (selected && (selected.direct || selected.provider.includes("Kawaii") || selected.provider.includes("Direct")))
+    )
+  );
   // Do not include the selected server in this key: changing ST/another server must not lose progress.
   const progressKey = activeEpisodeId ? `neonflix:watch-progress:shared:${anime.toLowerCase().replace(/\s+/g, " ").trim()}:${((activeTitle || title).match(/(\d+)/)?.[1] || "0")}` : "";
 
@@ -187,43 +211,66 @@ export default function Watch() {
             ) : (
               <iframe className="embed-player" src={customPlayer.embedUrl || customPlayer.url} title="Custom video" allow="autoplay; fullscreen; picture-in-picture; encrypted-media" allowFullScreen />
             )
-          ) : selected && playableUrl && !playError ? (
-            <video
-              key={`${activeEpisodeId}:${selected.id}`}
-              ref={videoRef}
-              className="video-player"
-              controls
-              playsInline
-              src={playableUrl}
-              onError={handlePlayerError}
-              onLoadedMetadata={() => { setPlayError(false); restoreVideoProgress(); }}
-              onTimeUpdate={saveVideoProgress}
-              onPause={saveVideoProgress}
-              onEnded={() => { try { localStorage.removeItem(progressKey); } catch (_) {} }}
-            >
-              <track kind="captions" />
-            </video>
-          ) : selected?.embeddable && !playError ? (
-            <iframe
-              className="embed-player"
-              src={selected.embedUrl || selected.url}
-              title={`${anime} - ${activeTitle}`}
-              allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
-              allowFullScreen
-              onError={handlePlayerError}
-            />
+          ) : selected ? (
+            isNativeVideo && !playError ? (
+              <video
+                key={`${activeEpisodeId}:${selected.id}`}
+                ref={videoRef}
+                className="video-player"
+                controls
+                playsInline
+                preload="metadata"
+                src={playableUrl}
+                onError={handlePlayerError}
+                onLoadedMetadata={() => { setPlayError(false); restoreVideoProgress(); }}
+                onTimeUpdate={saveVideoProgress}
+                onPause={saveVideoProgress}
+                onEnded={() => { try { localStorage.removeItem(progressKey); } catch (_) {} }}
+              >
+                {((selected as any).subtitles ?? []).map((sub: { id?: string; url: string; lang: string }, idx: number) => {
+                  const isArabic = /(ar|ara|arabic|عربي|العربية)/i.test(sub.lang);
+                  const subProxy = sub.url.startsWith("/api/video/proxy") ? sub.url : `/api/video/proxy?url=${encodeURIComponent(sub.url)}`;
+                  return (
+                    <track
+                      key={sub.id || idx}
+                      kind="subtitles"
+                      src={subProxy}
+                      srcLang={isArabic ? "ar" : "en"}
+                      label={sub.lang || (isArabic ? "العربية" : "English")}
+                      default={isArabic || idx === 0}
+                    />
+                  );
+                })}
+              </video>
+            ) : !playError ? (
+              <iframe
+                key={`embed:${activeEpisodeId}:${selected.id}`}
+                className="embed-player"
+                src={selected.embedUrl || selected.url}
+                title={`${anime} - ${activeTitle}`}
+                allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
+                allowFullScreen
+                onError={handlePlayerError}
+              />
+            ) : (
+              <div className="player-placeholder">
+                <Play size={42} />
+                <h2>تعذر تشغيل هذا السيرفر تلقائياً</h2>
+                <p>يمكنك تجربة السيرفر التالي أو اختيار سيرفر آخر من القائمة بالأسفل.</p>
+                <Button onClick={handlePlayerError}><Play size={14} /> الانتقال للسيرفر التالي</Button>
+              </div>
+            )
           ) : (
             <div className="player-placeholder">
               <Play size={42} />
-              <h2>{playError ? "جاري تجربة سيرفر بديل تلقائياً..." : watchSources.length ? "اختر مصدر مشاهدة" : "لا يوجد سيرفر مشاهدة مباشر"}</h2>
-              <p>{playError ? "يمكنك أيضاً اختيار سيرفر آخر يدوياً من القائمة بالأسفل." : "سيرفرات المشاهدة متاحة بالأسفل."}</p>
-              {selected ? <a href={selected.url} target="_blank" rel="noreferrer"><Button><ExternalLink size={16} /> فتح المصدر خارجيًا</Button></a> : null}
+              <h2>{watchSources.length ? "اختر سيرفر للمشاهدة" : "لا يوجد سيرفر مشاهدة مباشر"}</h2>
+              <p>انقر على أي سيرفر بالأسفل لبدء التشغيل الفوري داخل التطبيق.</p>
             </div>
           )}
-          <div className="player-footer"><span><span className="pulse-dot" /> READY</span><small>المصادر المحمية أو التي تمنع التضمين تفتح في موقعها الرسمي.</small></div>
+          <div className="player-footer"><span><span className="pulse-dot" /> READY</span><small>المشاهدة مدمجة بالكامل وبدون إعلانات خارجية داخل التطبيق.</small></div>
         </section>
 
-        <section className="sources-section watch-sources-section"><div className="section-header"><div><span className="section-eyebrow">WATCH SERVERS / 01</span><h2>سيرفرات المشاهدة</h2></div><span className="count-chip">{watchSources.length} سيرفر</span></div>{!watchSources.length ? <div className="empty-state"><Link2 size={28} /><span>لا توجد سيرفرات مشاهدة مباشرة لهذه الحلقة.</span><small>استخدم سيرفرات التحميل الخارجية أدناه.</small></div> : <div className="source-list">{watchSources.map((source, index) => <div key={source.id} className={`source-row ${selected?.id === source.id ? "source-active" : ""}`}><button onClick={() => selectWatchSource(source.id)} className="source-select"><SourceLogo source={source} /><span className="source-number">{String(index + 1).padStart(2, "0")}</span><div><b>{source.provider}</b><small>{source.quality ? `${source.quality} · ` : ""}{source.size || "مشاهدة مباشرة"}</small></div></button><div className="source-actions"><Button size="sm" variant="outline" onClick={() => selectWatchSource(source.id)}><Play size={14} /> تشغيل هنا</Button><a href={source.url} target="_blank" rel="noreferrer"><Button size="sm" variant="ghost"><ExternalLink size={14} /> خارجي</Button></a></div></div>)}</div>}</section>
+        <section className="sources-section watch-sources-section"><div className="section-header"><div><span className="section-eyebrow">WATCH SERVERS / 01</span><h2>سيرفرات المشاهدة</h2></div><span className="count-chip">{watchSources.length} سيرفر</span></div>{!watchSources.length ? <div className="empty-state"><Link2 size={28} /><span>لا توجد سيرفرات مشاهدة مباشرة لهذه الحلقة.</span><small>استخدم سيرفرات التحميل الخارجية أدناه.</small></div> : <div className="source-list">{watchSources.map((source, index) => <div key={source.id} className={`source-row ${selected?.id === source.id ? "source-active" : ""}`}><button onClick={() => selectWatchSource(source.id)} className="source-select"><SourceLogo source={source} /><span className="source-number">{String(index + 1).padStart(2, "0")}</span><div><b>{source.provider}</b><small>{source.quality ? `${source.quality} · ` : ""}{source.size || "مشاهدة مباشرة داخل التطبيق"}</small></div></button><div className="source-actions"><Button size="sm" variant={selected?.id === source.id ? "default" : "outline"} onClick={() => selectWatchSource(source.id)}><Play size={14} /> {selected?.id === source.id ? "يعمل الآن" : "تشغيل هنا"}</Button></div></div>)}</div>}</section>
         <section className="sources-section download-sources-section"><div className="section-header"><div><span className="section-eyebrow">DOWNLOAD SERVERS / 02</span><h2>سيرفرات التحميل</h2></div><span className="count-chip">{downloadSources.length} روابط</span></div>{!downloadSources.length ? <div className="empty-state"><FolderDown size={28} /><span>لا توجد روابط تحميل متاحة حاليًا.</span></div> : <div className="source-list">{downloadSources.map((source, index) => <div key={source.id} className="source-row download-source-row"><div className="source-select"><SourceLogo source={source} /><span className="source-number">{String(index + 1).padStart(2, "0")}</span><div><b>{source.provider} {source.direct ? <span className="text-xs text-amber-400 font-normal">⚡ مباشر</span> : null}</b><small>{source.quality ? `${source.quality} · ` : ""}{source.size || (source.direct ? "تحميل مباشر فائق السرعة" : "صفحة تحميل خارجية")}</small></div></div><div className="source-actions"><a href={source.url} target="_blank" rel="noreferrer"><Button size="sm" variant={source.direct ? "default" : "ghost"}><FolderDown size={14} /> {source.direct ? "تحميل مباشر" : "فتح صفحة التحميل"}</Button></a></div></div>)}</div>}</section>
         <div className="watch-note"><Terminal size={15} /><span>المنصة لا تنزّل الملفات مباشرة؛ زر التحميل يفتح صفحة المزود الخارجية يدويًا. بعض سيرفرات المشاهدة قد تمنع التضمين لأسباب تقنية.</span></div>
       </main>

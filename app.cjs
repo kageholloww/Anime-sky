@@ -763,6 +763,12 @@ async function resolveAnySourceServer(rawUrl) {
     }
   }
 
+  // Kawaii direct video resolution
+  if (value.includes("kawaii-anime.com") || value.includes("/video/")) {
+    const proxy = rawUrl.startsWith("/api/video/proxy") ? rawUrl : `/api/video/proxy?url=${encodeURIComponent(rawUrl)}`;
+    return { url: proxy, embedUrl: proxy, direct: true, provider: "Kawaii Direct", kind: "native" };
+  }
+
   // StreamTape / StreamFiles / StreamWish: never trust a .mp4 slug in the
   // URL — they always serve an HTML page, not a real file. Treat them as
   // embed-only regardless of the extension.
@@ -1207,7 +1213,28 @@ async function kawaiiSources(episodeId) {
     const ar = value => /(^|[^a-z])(ar|ara|arabic|العربية|عربي)([^a-z]|$)/i.test(value);
     return Number(ar(b.lang)) - Number(ar(a.lang));
   });
-  return sources.map((source, i) => { const url = String(source.url || ""); const native = /\.(mp4|webm|m3u8)(\?|$)/i.test(url) || /video\.kawaii-anime\.com/i.test(url); return { id: `kawaii-${animeId}-${ep}-${i + 1}`, title: "Kawaii", quality: String(source.quality || ""), size: "", url, resolvedUrl: url, direct: native, downloadable: native, watchable: native, embeddable: false, provider: "Kawaii Direct", logoText: "KW", kind: "stream", subtitles: subtitleTracks, hint: subtitleTracks.length ? "الترجمة العربية افتراضية ويمكن تبديلها من زر الترجمة" : (native ? "تشغيل مباشر بدون ملف ترجمة متاح" : "رابط مصدر Kawaii") }; }).filter(x => x.url);
+  return sources.map((source, i) => {
+    const rawUrl = String(source.url || "");
+    const proxyUrl = `/api/video/proxy?url=${encodeURIComponent(rawUrl)}`;
+    return {
+      id: `kawaii-${animeId}-${ep}-${i + 1}`,
+      title: "Kawaii",
+      quality: String(source.quality || "1080p"),
+      size: "",
+      url: proxyUrl,
+      rawUrl,
+      resolvedUrl: proxyUrl,
+      direct: true,
+      downloadable: true,
+      watchable: true,
+      embeddable: true,
+      provider: "Kawaii Direct",
+      logoText: "KW",
+      kind: "stream",
+      subtitles: subtitleTracks,
+      hint: subtitleTracks.length ? "الترجمة العربية افتراضية ويمكن تبديلها من زر الترجمة" : "تشغيل مباشر فائق السرعة داخل التطبيق"
+    };
+  }).filter(x => x.url);
 }
 
 module.exports = function (options) {
