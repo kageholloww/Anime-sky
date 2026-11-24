@@ -7,7 +7,8 @@ import { trpc } from "@/lib/trpc";
 import type { EpisodeSource } from "../../../server/animeApi";
 
 function isNativeVideoUrl(url: string) {
-  return /\.(mp4|webm|m3u8)(\?|$)/i.test(url);
+  if (!url) return false;
+  return /\.(mp4|webm|m3u8|mkv)(\?|$)/i.test(url) || url.includes("/api/video/proxy");
 }
 
 function providerClass(provider: string) {
@@ -74,9 +75,24 @@ export default function Watch() {
     return () => { cancelled = true; };
   }, [selected?.id, selected?.url, selected?.provider]);
 
-  const playableUrl = directUrl || (selected && isNativeVideoUrl(selected.url) ? selected.url : "");
+  const playableUrl = directUrl || (selected && (selected.direct || isNativeVideoUrl(selected.url)) ? selected.url : "");
   // Do not include the selected server in this key: changing ST/another server must not lose progress.
   const progressKey = activeEpisodeId ? `neonflix:watch-progress:shared:${anime.toLowerCase().replace(/\s+/g, " ").trim()}:${((activeTitle || title).match(/(\d+)/)?.[1] || "0")}` : "";
+
+  const handlePlayerError = () => {
+    if (!watchSources || watchSources.length <= 1) {
+      setPlayError(true);
+      return;
+    }
+    const currentIdx = watchSources.findIndex(s => s.id === (selectedId || watchSources[0]?.id));
+    if (currentIdx >= 0 && currentIdx < watchSources.length - 1) {
+      setSelectedId(watchSources[currentIdx + 1].id);
+      setPlayError(false);
+    } else {
+      setPlayError(true);
+    }
+  };
+
   const saveVideoProgress = () => {
     const video = videoRef.current || customVideoRef.current;
     if (!progressKey || !video || !Number.isFinite(video.currentTime) || video.currentTime < 1) return;
@@ -165,7 +181,45 @@ export default function Watch() {
 
         <section className="player-frame">
           <div className="player-topline"><span><Radio size={13} /> WATCH NODE ACTIVE</span><span>EPISODE READY</span></div>
-          {customPlayer ? (customPlayer.direct || isNativeVideoUrl(customPlayer.url) ? <video key={`custom:${customPlayer.url}`} ref={customVideoRef} className="video-player" controls playsInline src={customPlayer.url} onLoadedMetadata={() => restoreVideoProgress(customVideoRef.current)} onTimeUpdate={saveVideoProgress} onPause={saveVideoProgress} /> : <iframe className="embed-player" src={customPlayer.embedUrl || customPlayer.url} title="Custom video" allow="autoplay; fullscreen; picture-in-picture; encrypted-media" allowFullScreen />) : selected && playableUrl && !playError ? <video key={`${activeEpisodeId}:${selected.id}`} ref={videoRef} className="video-player" controls playsInline src={playableUrl} onError={() => setPlayError(true)} onLoadedMetadata={() => { setPlayError(false); restoreVideoProgress(); }} onTimeUpdate={saveVideoProgress} onPause={saveVideoProgress} onEnded={() => { try { localStorage.removeItem(progressKey); } catch (_) {} }}><track kind="captions" /></video> : selected?.embeddable && !playError ? <iframe className="embed-player" src={selected.embedUrl || selected.url} title={`${anime} - ${activeTitle}`} allow="autoplay; fullscreen; picture-in-picture; encrypted-media" allowFullScreen onError={() => setPlayError(true)} /> : <div className="player-placeholder"><Play size={42} /><h2>{playError ? "تعذر تشغيل المصدر داخل المشغل" : watchSources.length ? "اختر مصدر مشاهدة" : "لا يوجد سيرفر مشاهدة مباشر"}</h2><p>{playError ? "جرّب مصدرًا آخر من قائمة المشاهدة أو افتحه خارجيًا." : "سيرفرات التحميل منفصلة أسفل الصفحة، وبعض المصادر تمنع التضمين داخل المواقع."}</p>{selected ? <a href={selected.url} target="_blank" rel="noreferrer"><Button><ExternalLink size={16} /> فتح المصدر خارجيًا</Button></a> : null}</div>}
+          {customPlayer ? (
+            customPlayer.direct || isNativeVideoUrl(customPlayer.url) ? (
+              <video key={`custom:${customPlayer.url}`} ref={customVideoRef} className="video-player" controls playsInline src={customPlayer.url} onLoadedMetadata={() => restoreVideoProgress(customVideoRef.current)} onTimeUpdate={saveVideoProgress} onPause={saveVideoProgress} />
+            ) : (
+              <iframe className="embed-player" src={customPlayer.embedUrl || customPlayer.url} title="Custom video" allow="autoplay; fullscreen; picture-in-picture; encrypted-media" allowFullScreen />
+            )
+          ) : selected && playableUrl && !playError ? (
+            <video
+              key={`${activeEpisodeId}:${selected.id}`}
+              ref={videoRef}
+              className="video-player"
+              controls
+              playsInline
+              src={playableUrl}
+              onError={handlePlayerError}
+              onLoadedMetadata={() => { setPlayError(false); restoreVideoProgress(); }}
+              onTimeUpdate={saveVideoProgress}
+              onPause={saveVideoProgress}
+              onEnded={() => { try { localStorage.removeItem(progressKey); } catch (_) {} }}
+            >
+              <track kind="captions" />
+            </video>
+          ) : selected?.embeddable && !playError ? (
+            <iframe
+              className="embed-player"
+              src={selected.embedUrl || selected.url}
+              title={`${anime} - ${activeTitle}`}
+              allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
+              allowFullScreen
+              onError={handlePlayerError}
+            />
+          ) : (
+            <div className="player-placeholder">
+              <Play size={42} />
+              <h2>{playError ? "جاري تجربة سيرفر بديل تلقائياً..." : watchSources.length ? "اختر مصدر مشاهدة" : "لا يوجد سيرفر مشاهدة مباشر"}</h2>
+              <p>{playError ? "يمكنك أيضاً اختيار سيرفر آخر يدوياً من القائمة بالأسفل." : "سيرفرات المشاهدة متاحة بالأسفل."}</p>
+              {selected ? <a href={selected.url} target="_blank" rel="noreferrer"><Button><ExternalLink size={16} /> فتح المصدر خارجيًا</Button></a> : null}
+            </div>
+          )}
           <div className="player-footer"><span><span className="pulse-dot" /> READY</span><small>المصادر المحمية أو التي تمنع التضمين تفتح في موقعها الرسمي.</small></div>
         </section>
 

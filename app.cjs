@@ -3,6 +3,7 @@ const fs = require("fs");
 const express = require("express");
 const axios = require("axios");
 const qs = require("qs");
+const https = require("https");
 
 const CLUSTER_BASE = process.env.ANIME_CLUSTER_API_BASE || "https://p1.anifox.net/api";
 const CLUSTER_HEADERS = {
@@ -753,6 +754,15 @@ async function resolveAnySourceServer(rawUrl) {
   if (!rawUrl) return { url: rawUrl, embedUrl: rawUrl, direct: false, provider: "رابط خارجي", kind: "external" };
   const value = String(rawUrl).toLowerCase();
 
+  // MP4Upload direct video resolution
+  if (value.includes("mp4upload.com")) {
+    const direct = await resolveMp4UploadDirect(rawUrl);
+    if (direct) {
+      const proxy = `/api/video/proxy?url=${encodeURIComponent(direct)}`;
+      return { url: proxy, embedUrl: proxy, direct: true, provider: "MP4Upload", kind: "native" };
+    }
+  }
+
   // StreamTape / StreamFiles / StreamWish: never trust a .mp4 slug in the
   // URL — they always serve an HTML page, not a real file. Treat them as
   // embed-only regardless of the extension.
@@ -771,12 +781,14 @@ async function resolveAnySourceServer(rawUrl) {
 
   if (value.includes("mediafire.com")) {
     const r = await resolveMediafireServer(rawUrl);
-    return { url: r.url, embedUrl: r.url, direct: !!r.direct, provider: "MediaFire", kind: r.direct ? "native" : "page" };
+    const proxy = r.direct ? `/api/video/proxy?url=${encodeURIComponent(r.url)}` : r.url;
+    return { url: proxy, embedUrl: proxy, direct: !!r.direct, provider: "MediaFire", kind: r.direct ? "native" : "page" };
   }
 
   if (value.includes("pixeldrain.com")) {
     const r = resolvePixeldrainServer(rawUrl);
-    return { url: r.url, embedUrl: r.embedUrl, direct: !!r.direct, provider: "PixelDrain", kind: "native" };
+    const proxy = r.direct ? `/api/video/proxy?url=${encodeURIComponent(r.url)}` : r.url;
+    return { url: proxy, embedUrl: proxy, direct: !!r.direct, provider: "PixelDrain", kind: "native" };
   }
 
   if (/drive\.google\.com/.test(value) || /mega\.(nz|io)/.test(value)) {
@@ -786,41 +798,106 @@ async function resolveAnySourceServer(rawUrl) {
   return { url: rawUrl, embedUrl: rawUrl, direct: false, provider: "رابط خارجي", kind: "external" };
 }
 
+async function resolveMp4UploadDirect(mp4Url) {
+  if (!mp4Url) return null;
+  const embedUrl = mp4Url.includes("/embed-") ? mp4Url : mp4Url.replace(/mp4upload\.com\/([a-zA-Z0-9]+)(?:\.html)?/i, "mp4upload.com/embed-$1.html");
+  try {
+    const { data: html } = await axios.get(embedUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://www.mp4upload.com/",
+      },
+      timeout: 7000,
+      httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+    });
+    const match = String(html).match(/src:\s*["']([^"']+\.mp4[^"']*)["']/i);
+    if (match && match[1]) {
+      return match[1];
+    }
+  } catch (_) {}
+  return null;
+}
+
 // Apply the resolver to a single source object without changing its id.
 async function resolveSourceServer(source) {
   if (!source || !source.url) return source;
   const original = source.url;
 
-  // MP4Upload embed normalization
-  if (original.includes("mp4upload.com") && !original.includes("/embed-")) {
-    source.url = original.replace(/mp4upload\.com\/([a-zA-Z0-9]+)(?:\.html)?/, "mp4upload.com/embed-$1.html");
+  if (/mp4upload\.com/i.test(source.url)) {
+    const direct = await resolveMp4UploadDirect(source.url);
+    if (direct) {
+      source.url = `/api/video/proxy?url=${encodeURIComponent(direct)}`;
+      source.resolvedUrl = source.url;
+      source.direct = true;
+      source.watchable = true;
+      source.embeddable = false;
+      source.provider = "MP4Upload";
+      source.logoText = "MP4";
+      source.hint = "تشغيل مباشر فائق السرعة";
+      return source;
+    } else {
+      source.embedUrl = source.url.includes("/embed-") ? source.url : source.url.replace(/mp4upload\.com\/([a-zA-Z0-9]+)(?:\.html)?/i, "mp4upload.com/embed-$1.html");
+      source.url = source.embedUrl;
+      source.direct = false;
+      source.watchable = true;
+      source.embeddable = true;
+      source.provider = "MP4Upload";
+      source.logoText = "MP4";
+      return source;
+    }
   }
 
   if (/mediafire\.com/i.test(source.url)) {
     const r = await resolveMediafireServer(source.url);
     if (r.direct) {
       const isVideo = /\.(mp4|webm|mkv|m3u8)(\?|$)/i.test(r.url);
-      source.url = r.url;
-      source.resolvedUrl = r.url;
+      const finalUrl = isVideo ? `/api/video/proxy?url=${encodeURIComponent(r.url)}` : r.url;
+      source.url = finalUrl;
+      source.resolvedUrl = finalUrl;
       source.direct = true;
       source.watchable = isVideo || source.watchable !== false;
       source.embeddable = isVideo || source.embeddable !== false;
       source.hint = isVideo ? "تشغيل وتحميل مباشر" : "تحميل مباشر بنقرة واحدة";
-      source.embedUrl = r.url;
+      source.embedUrl = finalUrl;
       return source;
     }
   }
 
   if (/pixeldrain\.com\/u\//i.test(source.url)) {
     const r = resolvePixeldrainServer(source.url);
-    source.url = r.url;
-    source.embedUrl = r.embedUrl;
-    source.resolvedUrl = r.url;
+    const finalUrl = r.direct ? `/api/video/proxy?url=${encodeURIComponent(r.url)}` : r.url;
+    source.url = finalUrl;
+    source.embedUrl = finalUrl;
+    source.resolvedUrl = finalUrl;
     source.direct = r.direct;
     source.watchable = true;
     source.embeddable = false;
     source.downloadable = true;
     source.hint = "تشغيل مباشر (تجاوز رفض الاتصال)";
+    return source;
+  }
+
+  if (/voe\.sx/i.test(source.url)) {
+    const embed = source.url.includes("/e/") ? source.url : source.url.replace(/voe\.sx\/([a-zA-Z0-9]+)/i, "voe.sx/e/$1");
+    source.url = embed;
+    source.embedUrl = embed;
+    source.direct = false;
+    source.watchable = true;
+    source.embeddable = true;
+    source.provider = "VOE";
+    source.logoText = "VO";
+    return source;
+  }
+
+  if (/dsvplay\.com|dood/i.test(source.url)) {
+    const embed = source.url.replace(/\/d\//, "/e/");
+    source.url = embed;
+    source.embedUrl = embed;
+    source.direct = false;
+    source.watchable = true;
+    source.embeddable = true;
+    source.provider = "DoodStream";
+    source.logoText = "DS";
     return source;
   }
 
@@ -1623,9 +1700,8 @@ module.exports = function (options) {
     }
   });
 
-  // CORS proxy for direct video files that refuse to be played across origins.
-  // Streams the response body back so <video src="/api/video/proxy?url=...">
-  // works even when the upstream returns Access-Control-Allow-Origin: *.
+  // High-performance streaming proxy for direct video streams (MP4Upload, MediaFire, PixelDrain, etc.)
+  // Handles range requests (206 Partial Content), iOS-compatible MIME types, and CORS bypass.
   app.get("/api/video/proxy", async (req, res) => {
     try {
       const url = String(req.query.url || "").trim();
@@ -1633,6 +1709,13 @@ module.exports = function (options) {
         return res.status(400).json({ error: "INVALID_URL" });
       }
       const range = req.headers.range;
+      let referer = new URL(url).origin + "/";
+      if (/mp4upload\.com/i.test(url)) {
+        referer = "https://www.mp4upload.com/";
+      } else if (/kawaii-anime\.com|video\.kawaii-anime\.com/i.test(url)) {
+        referer = "https://kawaiianime.cc/";
+      }
+
       const upstream = await axios.get(url, {
         responseType: "stream",
         timeout: 30000,
@@ -1640,23 +1723,42 @@ module.exports = function (options) {
           "User-Agent": MF_UA,
           "Accept": "*/*",
           ...(range ? { Range: range } : {}),
-          "Referer": /kawaii-anime\.com|video\.kawaii-anime\.com/i.test(url) ? "https://kawaiianime.cc/" : new URL(url).origin + "/",
+          "Referer": referer,
         },
+        httpsAgent: new https.Agent({ rejectUnauthorized: false }),
         validateStatus: status => status >= 200 && status < 400,
       });
+
       res.status(upstream.status);
-      const ct = upstream.headers["content-type"];
-      if (ct) res.setHeader("Content-Type", ct);
+      let ct = upstream.headers["content-type"];
+      if (!ct || ct === "application/octet-stream" || ct === "binary/octet-stream" || ct.includes("text/plain")) {
+        if (/\.mp4(\?|$)/i.test(url)) ct = "video/mp4";
+        else if (/\.webm(\?|$)/i.test(url)) ct = "video/webm";
+        else if (/\.m3u8(\?|$)/i.test(url)) ct = "application/vnd.apple.mpegurl";
+        else if (/\.mkv(\?|$)/i.test(url)) ct = "video/mp4";
+        else ct = "video/mp4";
+      }
+      res.setHeader("Content-Type", ct);
+
       const cl = upstream.headers["content-length"];
       if (cl) res.setHeader("Content-Length", cl);
       const cr = upstream.headers["content-range"];
       if (cr) res.setHeader("Content-Range", cr);
-      const ar = upstream.headers["accept-ranges"];
-      if (ar) res.setHeader("Accept-Ranges", ar);
+      const ar = upstream.headers["accept-ranges"] || "bytes";
+      res.setHeader("Accept-Ranges", ar);
+
       res.setHeader("Access-Control-Allow-Origin", "*");
+      res.setHeader("Access-Control-Allow-Headers", "Range, Authorization, Content-Type, Accept");
+      res.setHeader("Access-Control-Expose-Headers", "Content-Range, Content-Length, Accept-Ranges");
       res.setHeader("Cache-Control", "public, max-age=3600");
+
       upstream.data.pipe(res);
-      upstream.data.on("error", () => res.end());
+      upstream.data.on("error", () => {
+        try { res.end(); } catch (_) {}
+      });
+      req.on("close", () => {
+        try { upstream.data.destroy(); } catch (_) {}
+      });
     } catch (e) {
       res.status(502).json({ error: e.message || "PROXY_FAILED" });
     }
@@ -2008,10 +2110,24 @@ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',
         var progressKey = 'neonflix:watch-progress:' + location.pathname + ':' + (new URLSearchParams(location.search).get('contentId') || 'unknown');
         function save(v){ if(!v || !isFinite(v.currentTime) || v.currentTime < 1) return; try{ localStorage.setItem(progressKey, JSON.stringify({time:v.currentTime,duration:isFinite(v.duration)?v.duration:0,savedAt:Date.now()})); }catch(e){} }
         function restore(v){ if(!v) return; try{ var x=JSON.parse(localStorage.getItem(progressKey)||'null'); if(x && isFinite(x.time) && x.time>=3 && (!isFinite(v.duration)||!v.duration||x.time<v.duration-5)){ var set=function(){try{v.currentTime=x.time;}catch(e){}}; if(v.readyState>=1)set(); else v.addEventListener('loadedmetadata',set,{once:true}); } }catch(e){} }
+        function tryNextServer(){
+          var rows = Array.from(document.querySelectorAll('.watch-sources-section .source-row'));
+          var activeIdx = rows.findIndex(function(r){ return r.classList.contains('source-active'); });
+          if (activeIdx >= 0 && activeIdx < rows.length - 1) {
+            var nextBtn = rows[activeIdx + 1].querySelector('button.source-select');
+            if (nextBtn) { nextBtn.click(); return true; }
+          }
+          return false;
+        }
         function wire(){
           document.querySelectorAll('.player-frame video').forEach(function(v){
             if(v.dataset.neonProgress==='1') return;
-            v.dataset.neonProgress='1'; v.addEventListener('loadedmetadata',function(){restore(v)}); v.addEventListener('timeupdate',function(){save(v)}); v.addEventListener('pause',function(){save(v)}); v.addEventListener('seeking',function(){save(v)});
+            v.dataset.neonProgress='1';
+            v.addEventListener('loadedmetadata',function(){restore(v)});
+            v.addEventListener('timeupdate',function(){save(v)});
+            v.addEventListener('pause',function(){save(v)});
+            v.addEventListener('seeking',function(){save(v)});
+            v.addEventListener('error',function(){ setTimeout(tryNextServer, 400); });
             restore(v);
           });
           document.querySelectorAll('.watch-sources-section .source-row').forEach(function(row){
