@@ -422,3 +422,10 @@ a { color: inherit; text-decoration: none; }
 .suggested-genre-match { border-color: #ff2abf; color: #ff85dc; background: rgba(255,42,191,.18); font-weight: 700; }
 .suggested-watch-btn { display: flex; align-items: center; justify-content: center; gap: 7px; width: 100%; height: 38px; background: var(--neon-cyan); color: #020b12; font-weight: 800; font-size: 12px; text-decoration: none; margin-top: 6px; transition: .2s ease; }
 .suggested-watch-btn:hover { background: #62f2ff; box-shadow: 0 0 20px rgba(0,229,255,.4); transform: translateY(-1px); }
+
+/* Mobile App Native UI Utilities */
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+.pb-safe { padding-bottom: max(16px, env(safe-area-inset-bottom)); }
+.pt-safe { padding-top: max(12px, env(safe-area-inset-top)); }
+
