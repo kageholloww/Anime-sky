@@ -15,14 +15,14 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: 'npm'
 
       - name: Install Dependencies
         run: npm install --legacy-peer-deps
 
       - name: Sync Capacitor iOS
-        run: npx cap sync ios
+        run: npx cap sync ios || npx cap copy ios
 
       - name: Build Xcode Project
         run: |
