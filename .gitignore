@@ -1,0 +1,9 @@
+node_modules/
+.env
+data/accounts.json
+data/*.tmp
+build/
+Payload/
+*.ipa
+.DS_Store
+Thumbs.db
