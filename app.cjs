@@ -2166,8 +2166,10 @@ module.exports = function (options) {
   app.get("/api/animeify/episode/:id/sources", async (req, res) => { try { res.json(await animeifySources(req.params.id)); } catch (e) { res.status(502).json({ error: e.message }); } });
   app.get("/api/animeify/:id", async (req, res) => { try { res.json(await animeifyDetails(req.params.id)); } catch (e) { res.status(502).json({ error: e.message }); } });
 
-  // ملفات dist الثابتة
-  const staticPath = path.join(__dirname, "dist");
+  // ملفات dist الثابتة (تفضيل مجلد dist/public المبني حديثاً بواسطة Vite)
+  const staticPath = fs.existsSync(path.join(__dirname, "dist", "public", "index.html"))
+    ? path.join(__dirname, "dist", "public")
+    : path.join(__dirname, "dist");
   app.use(express.static(staticPath, { index: false }));
 
   app.get("*", (req, res) => {
@@ -2209,7 +2211,27 @@ module.exports = function (options) {
       })();</script>`;
       const html = fs.readFileSync(indexPath, "utf8");
       const aliasBridge = `<script>(function(){var f=window.fetch;window.fetch=function(r,o){var u=String(r&&r.url||r||'');var p=[['/api/anime','/x/content'],['/api/witcher','/x/w'],['/api/kawaii','/x/kawaii'],['/api/animeify','/x/animeify'],['/api/episode','/x/episode'],['/api/auth','/x/auth']];p.forEach(function(x){if(u.indexOf(x[0])===0)u=x[1]+u.slice(x[0].length)});var sm=localStorage.getItem('neonflix-source')||'cluster';if(u.indexOf('/api/trpc/anime.')===0){u+=(u.indexOf('?')>=0?'&':'?')+'source='+encodeURIComponent(sm)}if(u!==String(r&&r.url||r||''))r=u;return f.call(this,r,o)};})();</script>`;
-      const sourceBridge = `<script>(function(){var key='neonflix-source',mode=localStorage.getItem(key)||'cluster';if(document.getElementById('source-switcher'))return;if(window.innerWidth<768&&location.pathname==='/')return;var bar=document.createElement('div');bar.id='source-switcher';bar.dir='rtl';bar.style='position:fixed;bottom:14px;left:14px;z-index:99990;display:flex;gap:4px;padding:4px 6px;background:rgba(5,8,15,.92);border:1px solid rgba(0,229,255,.35);border-radius:8px;font:700 10px Arial;box-shadow:0 4px 14px rgba(0,0,0,.6);max-width:92vw;overflow-x:auto';[['cluster','Anime Cluster'],['witcher','Anime Witcher'],['kawaii','Anime Kawaii'],['animeify','Animefy']].forEach(function(x){var b=document.createElement('button');b.textContent=x[1];b.style='border:1px solid '+(mode===x[0]?'#ff2abf':'#435064')+';background:'+(mode===x[0]?'rgba(255,42,191,.25)':'transparent')+';color:#fff;padding:5px 8px;border-radius:5px;cursor:pointer;white-space:nowrap;font-size:10px';b.onclick=function(){localStorage.setItem(key,x[0]);location.reload()};bar.appendChild(b)});document.body.appendChild(bar)})();</script>`;
+      const sourceBridge = `<script>(function(){
+        var clean=function(){
+          var o1=document.getElementById('persistent-source-switcher');if(o1)o1.remove();
+          var o2=document.getElementById('source-switcher');if(o2)o2.remove();
+        };
+        clean();
+        var key='neonflix-source',mode=localStorage.getItem(key)||'cluster';
+        var bar=document.createElement('div');
+        bar.id='source-switcher';
+        bar.dir='rtl';
+        bar.style='position:fixed;top:max(46px,env(safe-area-inset-top,46px));left:6px;right:6px;z-index:99990;display:flex;gap:4px;padding:4px;background:rgba(8,12,24,0.95);border:1px solid rgba(0,229,255,0.4);border-radius:10px;backdrop-filter:blur(10px);box-shadow:0 4px 18px rgba(0,0,0,0.75);box-sizing:border-box';
+        [['cluster','Anime Cluster'],['witcher','Anime Witcher'],['kawaii','Anime Kawaii'],['animeify','Animefy']].forEach(function(x){
+          var b=document.createElement('button');
+          b.textContent=x[1];
+          var active=mode===x[0];
+          b.style='flex:1 1 0;min-width:0;padding:6px 2px;border:1px solid '+(active?'#ff2abf':'rgba(255,255,255,0.12)')+';background:'+(active?'#ff2abf':'rgba(255,255,255,0.06)')+';color:#fff;font:700 11px system-ui,-apple-system,Arial;border-radius:7px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:center';
+          b.onclick=function(){localStorage.setItem(key,x[0]);location.reload()};
+          bar.appendChild(b);
+        });
+        document.body.appendChild(bar);
+      })();</script>`;
       const witcherEnhance = `<script>(function(){
         if(localStorage.getItem('neonflix-source')!=='witcher')return;
         var qs=new URLSearchParams(location.search), cid=qs.get('contentId')||'';
