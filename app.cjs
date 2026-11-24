@@ -781,6 +781,20 @@ async function resolveAnySourceServer(rawUrl) {
     return { url: r.url, embedUrl: r.embedUrl, direct: false, provider: "StreamFiles", kind: "embed" };
   }
 
+  if (value.includes("ok.ru")) {
+    const m = rawUrl.match(/ok\.ru\/(?:videoembed|video)\/([0-9]+)/i);
+    const id = m ? m[1] : "";
+    const embedUrl = id ? `https://ok.ru/videoembed/${id}` : rawUrl;
+    return { url: embedUrl, embedUrl, direct: false, provider: "OK.ru", kind: "embed" };
+  }
+
+  if (value.includes("sendvid.com")) {
+    const m = rawUrl.match(/sendvid\.com\/(?:embed\/)?([a-zA-Z0-9]+)/i);
+    const id = m ? m[1] : "";
+    const embedUrl = id ? `https://sendvid.com/embed/${id}` : rawUrl;
+    return { url: embedUrl, embedUrl, direct: false, provider: "SendVid", kind: "embed" };
+  }
+
   if (/\.(mp4|webm|m3u8|mkv)(\?|$)/i.test(rawUrl)) {
     return { url: rawUrl, embedUrl: rawUrl, direct: true, provider: "Direct", kind: "native" };
   }
@@ -798,7 +812,10 @@ async function resolveAnySourceServer(rawUrl) {
   }
 
   if (/drive\.google\.com/.test(value) || /mega\.(nz|io)/.test(value)) {
-    return { url: rawUrl, embedUrl: rawUrl, direct: false, provider: value.includes("mega") ? "Mega" : "Google Drive", kind: "page" };
+    let embedUrl = rawUrl;
+    if (/mega\.(nz|io)/.test(value)) embedUrl = rawUrl.replace(/\/file\//i, "/embed/");
+    else if (/drive\.google\.com/.test(value)) embedUrl = rawUrl.replace(/\/view.*$/i, "/preview");
+    return { url: embedUrl, embedUrl, direct: false, provider: value.includes("mega") ? "Mega" : "Google Drive", kind: "embed" };
   }
 
   return { url: rawUrl, embedUrl: rawUrl, direct: false, provider: "رابط خارجي", kind: "external" };
@@ -932,6 +949,64 @@ async function resolveSourceServer(source) {
     source.watchable = true;
     source.embeddable = true;
     source.hint = "تشغيل داخلي (StreamTape)";
+    return source;
+  }
+
+  if (/ok\.ru/i.test(source.url)) {
+    const m = source.url.match(/ok\.ru\/(?:videoembed|video)\/([0-9]+)/i);
+    const id = m ? m[1] : "";
+    const embed = id ? `https://ok.ru/videoembed/${id}` : source.url;
+    source.url = embed;
+    source.embedUrl = embed;
+    source.resolvedUrl = embed;
+    source.direct = false;
+    source.watchable = true;
+    source.embeddable = true;
+    source.provider = "OK.ru";
+    source.logoText = "OK";
+    source.hint = "تشغيل داخلي (OK.ru)";
+    return source;
+  }
+
+  if (/sendvid\.com/i.test(source.url)) {
+    const m = source.url.match(/sendvid\.com\/(?:embed\/)?([a-zA-Z0-9]+)/i);
+    const id = m ? m[1] : "";
+    const embed = id ? `https://sendvid.com/embed/${id}` : source.url;
+    source.url = embed;
+    source.embedUrl = embed;
+    source.resolvedUrl = embed;
+    source.direct = false;
+    source.watchable = true;
+    source.embeddable = true;
+    source.provider = "SendVid";
+    source.logoText = "SV";
+    source.hint = "تشغيل داخلي (SendVid)";
+    return source;
+  }
+
+  if (/mega\.(nz|io)/i.test(source.url)) {
+    const embed = source.url.replace(/\/file\//i, "/embed/");
+    source.url = embed;
+    source.embedUrl = embed;
+    source.resolvedUrl = embed;
+    source.direct = false;
+    source.watchable = true;
+    source.embeddable = true;
+    source.provider = "Mega";
+    source.logoText = "MG";
+    return source;
+  }
+
+  if (/drive\.google\.com/i.test(source.url)) {
+    const embed = source.url.replace(/\/view.*$/i, "/preview");
+    source.url = embed;
+    source.embedUrl = embed;
+    source.resolvedUrl = embed;
+    source.direct = false;
+    source.watchable = true;
+    source.embeddable = true;
+    source.provider = "Google Drive";
+    source.logoText = "GD";
     return source;
   }
 
@@ -1237,6 +1312,208 @@ async function kawaiiSources(episodeId) {
   }).filter(x => x.url);
 }
 
+// ─── Animefy: isolated fourth source ──────────────────────────────
+const ANIMEIFY = {
+  base: "https://animeify.net/animeify/apis_v4",
+  token: "8cnY80AZSbUCmR26Vku1VUUY4",
+  thumbBase: "https://animeify.net/animeify/files/thumbnails/",
+  userAgent: "Dalvik/2.1.0 (Linux; U; Android 12; SM-A235F Build/acdb9eb.2)",
+};
+
+async function animeifyPost(endpoint, params = {}) {
+  const body = new URLSearchParams({ ...params, Token: ANIMEIFY.token }).toString();
+  const { data } = await axios.post(
+    `${ANIMEIFY.base}/${endpoint}`,
+    body,
+    {
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": ANIMEIFY.userAgent,
+      },
+      timeout: 15000,
+    }
+  );
+  return data;
+}
+
+function animeifyCard(a = {}) {
+  const animeId = String(a.AnimeId || a.anime_id || a.Id || "");
+  const title = a.AR_Title?.trim() || a.Synonyms?.trim() || a.EN_Title?.trim() || "أنمي";
+  const enTitle = a.EN_Title?.trim() || "";
+  const thumb = a.Thumbnail || a.Photo || "";
+  const poster = thumb ? (thumb.startsWith("http") ? thumb : `${ANIMEIFY.thumbBase}${thumb}`) : null;
+  const rating = (a.Score && a.Score !== "0") ? String(a.Score) : "";
+  const epCount = a.Episodes ? String(a.Episodes) : "";
+  const rawGenres = typeof a.Genres === "string" ? a.Genres.split(",").map(s => s.trim()).filter(Boolean) : (Array.isArray(a.Genres) ? a.Genres : []);
+  const year = (a.Premiered || "").match(/\d{4}/)?.[0] || "";
+  const desc = String(a.Plot || a.Story || "").replace(/<[^>]+>/g, "").trim();
+
+  return {
+    id: animeId,
+    content_id: animeId,
+    contentId: animeId,
+    title,
+    content_title: title,
+    name: title,
+    englishTitle: enTitle,
+    poster,
+    poster_anilist_url: poster,
+    verticle_poster: poster,
+    year,
+    release_year: year,
+    rating,
+    ratings: rating,
+    episodes: epCount,
+    total_episodes: epCount,
+    airingDay: a.Status === "AIRING" ? "يعرض الآن" : (a.Status === "AIRED" ? "مكتمل" : (a.Status || "")),
+    genres: rawGenres,
+    genre_name: rawGenres,
+    description: desc,
+    source: "animeify",
+  };
+}
+
+async function animeifyLatest(limit = 24) {
+  try {
+    const raw = await animeifyPost("episodes/load_latest_episodes.php", { UserId: "0", Language: "AR", From: "0" });
+    const allItems = Array.isArray(raw) ? raw : [];
+    const seen = new Set(), unique = [];
+    for (const item of allItems) {
+      const a = item.Anime || {};
+      const id = a.AnimeId || a.anime_id || a.Id;
+      if (id && !seen.has(id)) {
+        seen.add(id);
+        const card = animeifyCard(a);
+        if (item.Episode?.Episode) {
+          card.episodes = String(item.Episode.Episode);
+          card.latestEpisode = String(item.Episode.Episode);
+        }
+        unique.push(card);
+        if (unique.length >= limit) break;
+      }
+    }
+    return unique;
+  } catch (err) {
+    console.error("[Animefy Latest Error]", err.message);
+    return [];
+  }
+}
+
+async function animeifySearch(query, limit = 24) {
+  try {
+    if (!query) return animeifyLatest(limit);
+    const raw = await animeifyPost("anime/load_anime_list_v2.php", {
+      UserId: "0",
+      Language: "AR",
+      FilterType: "SEARCH",
+      FilterData: String(query).trim(),
+      Type: "SERIES",
+      From: "0",
+    });
+    const results = Array.isArray(raw) ? raw : [];
+    return results.slice(0, limit).map(animeifyCard);
+  } catch (err) {
+    console.error("[Animefy Search Error]", err.message);
+    return [];
+  }
+}
+
+async function animeifyDetails(animeId) {
+  try {
+    const raw = await animeifyPost("anime/load_anime_details.php", {
+      UserId: "0",
+      Language: "AR",
+      AnimeId: String(animeId),
+      AnimeRelationId: "",
+    });
+    const a = raw && typeof raw === "object" ? raw : {};
+    const card = animeifyCard({ AnimeId: animeId, ...a });
+    if (a.Plot) card.description = String(a.Plot).replace(/<[^>]+>/g, "").trim();
+    return card;
+  } catch (err) {
+    console.error("[Animefy Details Error]", err.message);
+    return { id: animeId, title: "Animefy", source: "animeify" };
+  }
+}
+
+async function animeifySeasons(animeId) {
+  try {
+    const raw = await animeifyPost("episodes/load_episodes.php", { AnimeID: String(animeId) });
+    const list = Array.isArray(raw) ? raw : [];
+    list.sort((a, b) => (Number(a.Episode) || 0) - (Number(b.Episode) || 0));
+    const episodes = list.map((ep, idx) => ({
+      id: `${animeId}-ep${ep.Episode || idx + 1}`,
+      title: `الحلقة ${ep.Episode || idx + 1}`,
+      duration: "",
+      number: Number(ep.Episode) || idx + 1,
+    }));
+    return [{
+      id: `animeify-${animeId}`,
+      title: "الموسم 1",
+      number: 1,
+      episodes: episodes.length ? episodes : [{ id: `${animeId}-ep1`, title: "الحلقة 1", number: 1, duration: "" }],
+    }];
+  } catch (err) {
+    console.error("[Animefy Seasons Error]", err.message);
+    return [{ id: `animeify-${animeId}`, title: "الموسم 1", number: 1, episodes: [] }];
+  }
+}
+
+async function animeifySources(episodeId) {
+  const m = String(episodeId || "").match(/^(.*?)-ep(\d+)$/);
+  if (!m) return [];
+  const animeId = m[1];
+  const epNumber = m[2];
+
+  try {
+    const data = await animeifyPost("anime/load_servers.php", {
+      UserId: "0",
+      AnimeId: animeId,
+      Episode: String(epNumber),
+      AnimeType: "SERIES",
+    });
+    const ep = data?.CurrentEpisode || {};
+    const list = [];
+    if (ep.FRFhdQ?.trim()) list.push({ title: "سيرفر FHD MediaFire", url: `https://www.mediafire.com/file/${ep.FRFhdQ.trim()}`, provider: "MediaFire", quality: "1080p", logoText: "MF" });
+    if (ep.FRLink?.trim()) list.push({ title: "سيرفر HD MediaFire", url: `https://www.mediafire.com/file/${ep.FRLink.trim()}`, provider: "MediaFire", quality: "720p", logoText: "MF" });
+    if (ep.FRLowQ?.trim()) list.push({ title: "سيرفر SD MediaFire", url: `https://www.mediafire.com/file/${ep.FRLowQ.trim()}`, provider: "MediaFire", quality: "480p", logoText: "MF" });
+    if (ep.OKLink?.trim()) list.push({ title: "سيرفر OK.ru", url: `https://ok.ru/videoembed/${ep.OKLink.trim()}`, provider: "OK.ru", quality: "HD", logoText: "OK" });
+    if (ep.SVLink?.trim() && ep.SVLink !== "1") list.push({ title: "سيرفر SendVid", url: `https://sendvid.com/embed/${ep.SVLink.trim()}`, provider: "SendVid", quality: "HD", logoText: "SV" });
+    if (ep.SVLowQ?.trim()) list.push({ title: "سيرفر SendVid SD", url: `https://sendvid.com/embed/${ep.SVLowQ.trim()}`, provider: "SendVid", quality: "SD", logoText: "SV" });
+    if (ep.MALink?.trim()) list.push({ title: "سيرفر Mega", url: `https://mega.nz/embed/${ep.MALink.trim()}`, provider: "Mega", quality: "HD", logoText: "MG" });
+    if (ep.GDLink?.trim()) list.push({ title: "سيرفر Google Drive", url: `https://drive.google.com/file/d/${ep.GDLink.trim()}/preview`, provider: "Google Drive", quality: "HD", logoText: "GD" });
+    if (ep.GDFhdQ?.trim()) list.push({ title: "سيرفر Google Drive FHD", url: `https://drive.google.com/file/d/${ep.GDFhdQ.trim()}/preview`, provider: "Google Drive", quality: "1080p", logoText: "GD" });
+    if (ep.SFLink?.trim()) list.push({ title: "سيرفر SolidFiles", url: `http://www.solidfiles.com/v/${ep.SFLink.trim()}`, provider: "SolidFiles", quality: "SD", logoText: "SF" });
+    if (ep.LBLink?.trim() && /^https?:\/\//i.test(ep.LBLink.trim())) list.push({ title: "سيرفر مباشر LB", url: ep.LBLink.trim(), provider: "Direct", quality: "HD", logoText: "LB" });
+    if (ep.FHLink?.trim() && /^https?:\/\//i.test(ep.FHLink.trim())) list.push({ title: "سيرفر مباشر FH", url: ep.FHLink.trim(), provider: "Direct", quality: "HD", logoText: "FH" });
+    if (ep.FDLink?.trim()) list.push({ title: "تحميل MediaFire FD", url: `https://www.mediafire.com/file/${ep.FDLink.trim()}`, provider: "MediaFire", quality: "HD", logoText: "MF" });
+
+    const formatted = list.map((item, idx) => {
+      const isMf = item.provider === "MediaFire";
+      const isOk = item.provider === "OK.ru";
+      const isSv = item.provider === "SendVid";
+      return {
+        id: `animeify-${animeId}-${epNumber}-${idx + 1}`,
+        title: item.title,
+        quality: item.quality || "1080p",
+        size: "",
+        url: item.url,
+        downloadable: isMf,
+        watchable: isMf || isOk || isSv || item.provider === "Direct",
+        embeddable: isMf || isOk || isSv || item.provider === "Mega" || item.provider === "Google Drive" || item.provider === "Direct",
+        provider: item.provider,
+        logoText: item.logoText || "AF",
+        kind: isMf ? "native" : (isOk || isSv ? "embed" : "stream"),
+      };
+    });
+
+    return await resolveSourceList(formatted);
+  } catch (err) {
+    console.error("[Animefy Sources Error]", err.message);
+    return [];
+  }
+}
+
 module.exports = function (options) {
   const port = (typeof options === "number" ? options : (options && options.port)) || process.env.PORT || 3000;
   const app = express();
@@ -1271,7 +1548,7 @@ module.exports = function (options) {
   // Public-facing aliases: upstream provider names and internal route names do
   // not need to be exposed to the browser. The rewrite stays server-side.
   app.use((req, _res, next) => {
-    const aliases = [["/x/gateway", "/api/trpc"], ["/x/content", "/api/anime"], ["/x/w", "/api/witcher"], ["/x/kawaii", "/api/kawaii"], ["/x/episode", "/api/episode"], ["/x/auth", "/api/auth"]];
+    const aliases = [["/x/gateway", "/api/trpc"], ["/x/content", "/api/anime"], ["/x/w", "/api/witcher"], ["/x/kawaii", "/api/kawaii"], ["/x/animeify", "/api/animeify"], ["/x/episode", "/api/episode"], ["/x/auth", "/api/auth"]];
     for (const [from, to] of aliases) {
       if (req.url === from || req.url.startsWith(`${from}/`) || req.url.startsWith(`${from}?`)) { req.url = to + req.url.slice(from.length); break; }
     }
@@ -1354,77 +1631,106 @@ module.exports = function (options) {
           } else if (procedure === "auth.logout") {
             value = { success: true };
           } else if (procedure === "anime.latest") {
-            value = await getClusterLatest(input.start || 0, input.limit || 12);
+            const source = String(req.query.source || "").toLowerCase();
+            value = source === "animeify" ? await animeifyLatest(input.limit || 24) : source === "kawaii" ? await kawaiiSearch("", input.limit || 24, [], 1) : source === "witcher" ? await witcherLatest(input.limit || 24) : await getClusterLatest(input.start || 0, input.limit || 24);
           } else if (procedure === "anime.random") {
             const source = String(req.query.source || "").toLowerCase();
             const genres = input.genres || input.genre || input.genreId || [];
-            value = source === "witcher" ? await witcherRandom(genres, input.exclude || []) : source === "kawaii" ? ((await kawaiiRecommend(genres, 1, input.exclude || [])) || [])[0] || null : await getClusterRandom(genres);
+            value = source === "animeify" ? ((await animeifyLatest(24)) || [])[0] || null : source === "witcher" ? await witcherRandom(genres, input.exclude || []) : source === "kawaii" ? ((await kawaiiRecommend(genres, 1, input.exclude || [])) || [])[0] || null : await getClusterRandom(genres);
           } else if (procedure === "anime.genres") {
             value = DEFAULT_GENRES;
           } else if (procedure === "anime.details") {
-            const raw = await clusterApiPost("Content/getContentDetailsByID", {
-              user_id: "B80E7D43",
-              content_id: String(input.id || ""),
-              exclude_seasons: "1",
-            });
-            const item = raw?.data && !Array.isArray(raw.data) ? raw.data : raw;
-            value = normalizeCard(item || {});
+            const source = String(req.query.source || "").toLowerCase();
+            const id = String(input.id || "");
+            if (source === "animeify" || id.startsWith("x")) {
+              value = await animeifyDetails(id);
+            } else if (source === "kawaii") {
+              value = await kawaiiDetails(id);
+            } else if (source === "witcher") {
+              value = await witcherLoad(id);
+            } else {
+              const raw = await clusterApiPost("Content/getContentDetailsByID", {
+                user_id: "B80E7D43",
+                content_id: id,
+                exclude_seasons: "1",
+              });
+              const item = raw?.data && !Array.isArray(raw.data) ? raw.data : raw;
+              value = normalizeCard(item || {});
+            }
           } else if (procedure === "anime.seasons") {
-            const raw = await clusterApiPost("Content/getSeasonByContentID", {
-              user_id: "B80E7D43",
-              content_id: String(input.id || ""),
-              lazy: "1",
-            });
-            value = apiList(raw).map((season, seasonIndex) => ({
-              id: String(season.season_id || seasonIndex + 1),
-              title: String(season.season_title || `الموسم ${seasonIndex + 1}`),
-              number: seasonIndex + 1,
-              episodes: (Array.isArray(season.episodes) ? season.episodes : []).map((episode, episodeIndex) => ({
-                id: String(episode.episode_id || episodeIndex + 1),
-                title: String(episode.episode_title || `الحلقة ${episodeIndex + 1}`),
-                duration: String(episode.episode_duration || ""),
-                number: Number(episode.episode_number || episodeIndex + 1),
-              })),
-            }));
+            const source = String(req.query.source || "").toLowerCase();
+            const id = String(input.id || "");
+            if (source === "animeify" || id.startsWith("x")) {
+              value = await animeifySeasons(id);
+            } else if (source === "kawaii") {
+              value = await kawaiiSeasons(id);
+            } else if (source === "witcher") {
+              value = await witcherSeasons(id);
+            } else {
+              const raw = await clusterApiPost("Content/getSeasonByContentID", {
+                user_id: "B80E7D43",
+                content_id: id,
+                lazy: "1",
+              });
+              value = apiList(raw).map((season, seasonIndex) => ({
+                id: String(season.season_id || seasonIndex + 1),
+                title: String(season.season_title || `الموسم ${seasonIndex + 1}`),
+                number: seasonIndex + 1,
+                episodes: (Array.isArray(season.episodes) ? season.episodes : []).map((episode, episodeIndex) => ({
+                  id: String(episode.episode_id || episodeIndex + 1),
+                  title: String(episode.episode_title || `الحلقة ${episodeIndex + 1}`),
+                  duration: String(episode.episode_duration || ""),
+                  number: Number(episode.episode_number || episodeIndex + 1),
+                })),
+              }));
+            }
           } else if (procedure === "anime.episodeSources") {
-            const raw = await clusterApiPost("Content/getSourceByEpisodeID", {
-              episode_id: String(input.episodeId || ""),
-            });
-            const formatted = apiList(raw).map((source, sourceIndex) => {
-              const url = String(source.source || source.source_url || source.url || "");
-              const provider = /playmogo/i.test(url) ? "PlayMogo" :
-                /mediafire/i.test(url) ? "MediaFire" :
-                /mega\.(nz|io)/i.test(url) ? "Mega" :
-                /drive\.google/i.test(url) ? "Google Drive" :
-                /mp4upload/i.test(url) ? "MP4Upload" :
-                /uqload/i.test(url) ? "UQLoad" :
-                /streamtape/i.test(url) ? "StreamTape" :
-                /pixeldrain/i.test(url) ? "PixelDrain" :
-                /streamwish|streamfiles/i.test(url) ? "StreamFiles" :
-                /voe\.sx/i.test(url) ? "Voe" :
-                /doodstream|dsvplay/i.test(url) ? "DoodStream" :
-                /dailymotion/i.test(url) ? "DailyMotion" :
-                /youtu/i.test(url) ? "YouTube" : "AnimeCluster";
-              const downloadable = source.downloadable === true || source.downloadable === 1 || source.downloadable === "1";
-              const isNative = /\.(mp4|webm|m3u8)(\?|$)/i.test(url);
-              const isStreamProvider = ["MP4Upload","UQLoad","Voe","DoodStream","StreamTape","StreamFiles"].includes(provider);
-              const isDownloadProvider = ["MediaFire","Mega","Google Drive"].includes(provider);
-              const logoMap = { "MediaFire":"MF","Mega":"MEGA","Google Drive":"DRIVE","MP4Upload":"MP4","UQLoad":"UQ","StreamTape":"ST","PixelDrain":"PD","StreamFiles":"SF","Voe":"VOE","DoodStream":"DOOD","DailyMotion":"DM","YouTube":"YT","PlayMogo":"PM" };
-              return {
-                id: String(source.source_id || source.id || sourceIndex + 1),
-                title: String(source.source_title || source.title || `مصدر ${sourceIndex + 1}`),
-                quality: String(source.source_quality || source.quality || ""),
-                size: String(source.source_size || source.size || ""),
-                url,
-                downloadable: downloadable || isDownloadProvider,
-                watchable: isNative || isStreamProvider || provider === "PixelDrain" || provider === "DailyMotion" || provider === "YouTube",
-                embeddable: isNative || isStreamProvider || provider === "PixelDrain" || provider === "DailyMotion" || provider === "YouTube",
-                provider,
-                logoText: logoMap[provider] || "CL",
-                kind: isDownloadProvider ? "download" : "stream",
-              };
-            }).filter(source => source.url);
-            value = await resolveSourceList(formatted);
+            const source = String(req.query.source || "").toLowerCase();
+            const epId = String(input.episodeId || "");
+            if (source === "animeify" || epId.startsWith("animeify-") || /-[a-zA-Z0-9]+-ep\d+/.test(epId)) {
+              value = await animeifySources(epId);
+            } else if (source === "kawaii" || /^\d+-ep\d+$/.test(epId)) {
+              value = await kawaiiSources(epId);
+            } else {
+              const raw = await clusterApiPost("Content/getSourceByEpisodeID", {
+                episode_id: epId,
+              });
+              const formatted = apiList(raw).map((source, sourceIndex) => {
+                const url = String(source.source || source.source_url || source.url || "");
+                const provider = /playmogo/i.test(url) ? "PlayMogo" :
+                  /mediafire/i.test(url) ? "MediaFire" :
+                  /mega\.(nz|io)/i.test(url) ? "Mega" :
+                  /drive\.google/i.test(url) ? "Google Drive" :
+                  /mp4upload/i.test(url) ? "MP4Upload" :
+                  /uqload/i.test(url) ? "UQLoad" :
+                  /streamtape/i.test(url) ? "StreamTape" :
+                  /pixeldrain/i.test(url) ? "PixelDrain" :
+                  /streamwish|streamfiles/i.test(url) ? "StreamFiles" :
+                  /voe\.sx/i.test(url) ? "Voe" :
+                  /doodstream|dsvplay/i.test(url) ? "DoodStream" :
+                  /dailymotion/i.test(url) ? "DailyMotion" :
+                  /youtu/i.test(url) ? "YouTube" : "AnimeCluster";
+                const downloadable = source.downloadable === true || source.downloadable === 1 || source.downloadable === "1";
+                const isNative = /\.(mp4|webm|m3u8)(\?|$)/i.test(url);
+                const isStreamProvider = ["MP4Upload","UQLoad","Voe","DoodStream","StreamTape","StreamFiles"].includes(provider);
+                const isDownloadProvider = ["MediaFire","Mega","Google Drive"].includes(provider);
+                const logoMap = { "MediaFire":"MF","Mega":"MEGA","Google Drive":"DRIVE","MP4Upload":"MP4","UQLoad":"UQ","StreamTape":"ST","PixelDrain":"PD","StreamFiles":"SF","Voe":"VOE","DoodStream":"DOOD","DailyMotion":"DM","YouTube":"YT","PlayMogo":"PM" };
+                return {
+                  id: String(source.source_id || source.id || sourceIndex + 1),
+                  title: String(source.source_title || source.title || `مصدر ${sourceIndex + 1}`),
+                  quality: String(source.source_quality || source.quality || ""),
+                  size: String(source.source_size || source.size || ""),
+                  url,
+                  downloadable: downloadable || isDownloadProvider,
+                  watchable: isNative || isStreamProvider || provider === "PixelDrain" || provider === "DailyMotion" || provider === "YouTube",
+                  embeddable: isNative || isStreamProvider || provider === "PixelDrain" || provider === "DailyMotion" || provider === "YouTube",
+                  provider,
+                  logoText: logoMap[provider] || "CL",
+                  kind: isDownloadProvider ? "download" : "stream",
+                };
+              }).filter(source => source.url);
+              value = await resolveSourceList(formatted);
+            }
           } else if (procedure.startsWith("account.")) {
             value = accountProcedure(procedure, input, req);
           }
@@ -1439,7 +1745,7 @@ module.exports = function (options) {
 
       if (p.includes("anime.latest")) {
         const source = String(req.query.source || "").toLowerCase();
-        const items = source === "kawaii" ? await kawaiiSearch("", 24, [], 1) : source === "witcher" ? await witcherLatest(24) : await getClusterLatest(0, 24);
+        const items = source === "animeify" ? await animeifyLatest(24) : source === "kawaii" ? await kawaiiSearch("", 24, [], 1) : source === "witcher" ? await witcherLatest(24) : await getClusterLatest(0, 24);
         return res.json({ result: { data: { json: items } } });
       }
 
@@ -1447,7 +1753,7 @@ module.exports = function (options) {
         const input = parseTrpcInput(req);
         const source = String(req.query.source || "").toLowerCase();
         const genres = input.genres || input.genre || input.genreId || [];
-        const result = source === "witcher" ? await witcherRandom(genres, input.exclude || []) : source === "kawaii" ? await kawaiiRecommend(genres, 1, input.exclude || []) : await getClusterRandom(genres);
+        const result = source === "animeify" ? ((await animeifyLatest(24)) || [])[0] || null : source === "witcher" ? await witcherRandom(genres, input.exclude || []) : source === "kawaii" ? await kawaiiRecommend(genres, 1, input.exclude || []) : await getClusterRandom(genres);
         return res.json({ result: { data: { json: Array.isArray(result) ? (result[0] || null) : result } } });
       }
 
@@ -1477,6 +1783,10 @@ module.exports = function (options) {
         const start = Math.max(0, Number(input.start) || 0);
         const limit = Math.min(50, Math.max(1, Number(input.limit) || 24));
         const source = String(req.query.source || "").toLowerCase();
+        if (source === "animeify") {
+          const items = await animeifySearch(kw, limit);
+          return res.json({ result: { data: { json: items } } });
+        }
         if (source === "kawaii") {
           const items = await kawaiiSearch(kw, limit, [], Math.floor(start / limit) + 1);
           return res.json({ result: { data: { json: items } } });
@@ -1500,10 +1810,20 @@ module.exports = function (options) {
       }
 
       if (p.includes("anime.details")) {
-        const id = parseTrpcInput(req).id || "";
+        const id = String(parseTrpcInput(req).id || "");
+        const source = String(req.query.source || "").toLowerCase();
+        if (source === "animeify" || id.startsWith("x")) {
+          return res.json({ result: { data: { json: await animeifyDetails(id) } } });
+        }
+        if (source === "kawaii") {
+          return res.json({ result: { data: { json: await kawaiiDetails(id) } } });
+        }
+        if (source === "witcher") {
+          return res.json({ result: { data: { json: await witcherLoad(id) } } });
+        }
         const raw = await clusterApiPost("Content/getContentDetailsByID", {
           user_id: "B80E7D43",
-          content_id: String(id),
+          content_id: id,
           exclude_seasons: "1"
         });
         const item = raw?.data && !Array.isArray(raw.data) ? raw.data : raw;
@@ -1511,10 +1831,20 @@ module.exports = function (options) {
       }
 
       if (p.includes("anime.seasons")) {
-        const id = parseTrpcInput(req).id || "";
+        const id = String(parseTrpcInput(req).id || "");
+        const source = String(req.query.source || "").toLowerCase();
+        if (source === "animeify" || id.startsWith("x")) {
+          return res.json({ result: { data: { json: await animeifySeasons(id) } } });
+        }
+        if (source === "kawaii") {
+          return res.json({ result: { data: { json: await kawaiiSeasons(id) } } });
+        }
+        if (source === "witcher") {
+          return res.json({ result: { data: { json: await witcherSeasons(id) } } });
+        }
         const raw = await clusterApiPost("Content/getSeasonByContentID", {
           user_id: "B80E7D43",
-          content_id: String(id),
+          content_id: id,
           lazy: "1"
         });
         const seasons = apiList(raw);
@@ -1533,9 +1863,16 @@ module.exports = function (options) {
       }
 
       if (p.includes("anime.episodeSources")) {
-        const epId = parseTrpcInput(req).episodeId || "";
+        const epId = String(parseTrpcInput(req).episodeId || "");
+        const source = String(req.query.source || "").toLowerCase();
+        if (source === "animeify" || epId.startsWith("animeify-") || /-[a-zA-Z0-9]+-ep\d+/.test(epId)) {
+          return res.json({ result: { data: { json: await animeifySources(epId) } } });
+        }
+        if (source === "kawaii" || /^\d+-ep\d+$/.test(epId)) {
+          return res.json({ result: { data: { json: await kawaiiSources(epId) } } });
+        }
         const raw = await clusterApiPost("Content/getSourceByEpisodeID", {
-          episode_id: String(epId)
+          episode_id: epId
         });
         const sources = apiList(raw);
         const formatted = sources.map((s, idx) => {
@@ -1822,6 +2159,13 @@ module.exports = function (options) {
   // parallel MediaFire requests can yield one direct URL and one raw page.
   app.get("/api/witcher/:animeId/episode/:episodeId/sources", async (req, res) => { try { const item = await witcherLoad(req.params.animeId); const list = await witcherSources(item.animePath, req.params.episodeId); res.json(list); } catch (e) { res.status(502).json({ error: e.message }); } });
 
+  // Animefy endpoints never fall back to other sources and carry source=animeify.
+  app.get("/api/animeify/latest", async (req, res) => { try { res.json(await animeifyLatest(req.query.limit || 24)); } catch (e) { res.status(502).json({ error: e.message }); } });
+  app.get("/api/animeify/search", async (req, res) => { try { res.json(await animeifySearch(req.query.q || req.query.query || "", req.query.limit || 24)); } catch (e) { res.status(502).json({ error: e.message }); } });
+  app.get("/api/animeify/:id/seasons", async (req, res) => { try { res.json(await animeifySeasons(req.params.id)); } catch (e) { res.status(502).json({ error: e.message }); } });
+  app.get("/api/animeify/episode/:id/sources", async (req, res) => { try { res.json(await animeifySources(req.params.id)); } catch (e) { res.status(502).json({ error: e.message }); } });
+  app.get("/api/animeify/:id", async (req, res) => { try { res.json(await animeifyDetails(req.params.id)); } catch (e) { res.status(502).json({ error: e.message }); } });
+
   // ملفات dist الثابتة
   const staticPath = path.join(__dirname, "dist");
   app.use(express.static(staticPath, { index: false }));
@@ -1864,8 +2208,8 @@ module.exports = function (options) {
         setInterval(scan,1000); scan();
       })();</script>`;
       const html = fs.readFileSync(indexPath, "utf8");
-      const aliasBridge = `<script>(function(){var f=window.fetch;window.fetch=function(r,o){var u=String(r&&r.url||r||'');var p=[['/api/anime','/x/content'],['/api/witcher','/x/w'],['/api/kawaii','/x/kawaii'],['/api/episode','/x/episode'],['/api/auth','/x/auth']];p.forEach(function(x){if(u.indexOf(x[0])===0)u=x[1]+u.slice(x[0].length)});var sm=localStorage.getItem('neonflix-source')||'cluster';if(u.indexOf('/api/trpc/anime.search')===0||u.indexOf('/api/trpc/anime.random')===0||u.indexOf('/api/trpc/anime.latest')===0){u+=(u.indexOf('?')>=0?'&':'?')+'source='+encodeURIComponent(sm)}if(u!==String(r&&r.url||r||''))r=u;return f.call(this,r,o)};})();</script>`;
-      const sourceBridge = `<script>(function(){var key='neonflix-source',mode=localStorage.getItem(key)||'cluster';if(document.getElementById('source-switcher'))return;var bar=document.createElement('div');bar.id='source-switcher';bar.dir='rtl';bar.style='position:fixed;top:12px;right:14px;z-index:99990;display:flex;gap:5px;padding:5px;background:rgba(5,8,15,.9);border:1px solid rgba(0,229,255,.35);font:700 11px Arial';[['cluster','Anime Cluster'],['witcher','Anime Witcher'],['kawaii','Anime Kawaii']].forEach(function(x){var b=document.createElement('button');b.textContent=x[1];b.style='border:1px solid '+(mode===x[0]?'#ff2abf':'#435064')+';background:'+(mode===x[0]?'rgba(255,42,191,.2)':'transparent')+';color:#fff;padding:7px 9px;cursor:pointer';b.onclick=function(){localStorage.setItem(key,x[0]);location.reload()};bar.appendChild(b)});document.body.appendChild(bar)})();</script>`;
+      const aliasBridge = `<script>(function(){var f=window.fetch;window.fetch=function(r,o){var u=String(r&&r.url||r||'');var p=[['/api/anime','/x/content'],['/api/witcher','/x/w'],['/api/kawaii','/x/kawaii'],['/api/animeify','/x/animeify'],['/api/episode','/x/episode'],['/api/auth','/x/auth']];p.forEach(function(x){if(u.indexOf(x[0])===0)u=x[1]+u.slice(x[0].length)});var sm=localStorage.getItem('neonflix-source')||'cluster';if(u.indexOf('/api/trpc/anime.')===0){u+=(u.indexOf('?')>=0?'&':'?')+'source='+encodeURIComponent(sm)}if(u!==String(r&&r.url||r||''))r=u;return f.call(this,r,o)};})();</script>`;
+      const sourceBridge = `<script>(function(){var key='neonflix-source',mode=localStorage.getItem(key)||'cluster';if(document.getElementById('source-switcher'))return;if(window.innerWidth<768&&location.pathname==='/')return;var bar=document.createElement('div');bar.id='source-switcher';bar.dir='rtl';bar.style='position:fixed;bottom:14px;left:14px;z-index:99990;display:flex;gap:4px;padding:4px 6px;background:rgba(5,8,15,.92);border:1px solid rgba(0,229,255,.35);border-radius:8px;font:700 10px Arial;box-shadow:0 4px 14px rgba(0,0,0,.6);max-width:92vw;overflow-x:auto';[['cluster','Anime Cluster'],['witcher','Anime Witcher'],['kawaii','Anime Kawaii'],['animeify','Animefy']].forEach(function(x){var b=document.createElement('button');b.textContent=x[1];b.style='border:1px solid '+(mode===x[0]?'#ff2abf':'#435064')+';background:'+(mode===x[0]?'rgba(255,42,191,.25)':'transparent')+';color:#fff;padding:5px 8px;border-radius:5px;cursor:pointer;white-space:nowrap;font-size:10px';b.onclick=function(){localStorage.setItem(key,x[0]);location.reload()};bar.appendChild(b)});document.body.appendChild(bar)})();</script>`;
       const witcherEnhance = `<script>(function(){
         if(localStorage.getItem('neonflix-source')!=='witcher')return;
         var qs=new URLSearchParams(location.search), cid=qs.get('contentId')||'';

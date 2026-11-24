@@ -55,9 +55,8 @@ export default function Watch() {
   const saveHistory = trpc.account.saveHistory.useMutation();
   const watchSources = useMemo(() => {
     const list = (sources.data ?? []).filter(source =>
-      (source.watchable || source.provider.includes("Direct")) &&
-      (source.provider.includes("Direct") || !["MediaFire", "Mega", "Google Drive"].includes(source.provider) ||
-        (source.direct && isNativeVideoUrl(source.url)))
+      (source.watchable || source.embeddable || source.direct || source.provider.includes("Direct")) &&
+      (!["MediaFire"].includes(source.provider) || (source.direct && isNativeVideoUrl(source.url)))
     );
     // Keep StreamTape first when Witcher provides it, without removing any other server.
     return [...list].sort((a, b) => {

@@ -146,24 +146,147 @@ function formatVotes(votes?: string | number): string {
   return `${n} تصويت`;
 }
 
-// Single Anime Card component matching the mobile app screenshot
-function MobileAnimeCard({ anime, onClickMore }: { anime: AnimeCardType; onClickMore?: (anime: AnimeCardType) => void }) {
+// Single Anime Card component matching the mobile app screenshot with flexible layouts
+function MobileAnimeCard({
+  anime,
+  layout = "grid6",
+  onClickMore,
+}: {
+  anime: AnimeCardType;
+  layout?: "grid6" | "scroll" | "grid3";
+  onClickMore?: (anime: AnimeCardType) => void;
+}) {
   const ratingNum = parseFloat(anime.rating || "0");
-  const displayRating = ratingNum > 0 ? ratingNum.toFixed(2) : (7.5 + (parseInt(anime.id.slice(-2) || "5", 16) % 20) / 10).toFixed(2);
+  const displayRating = ratingNum > 0 ? ratingNum.toFixed(1) : (7.5 + (parseInt(anime.id.slice(-2) || "5", 16) % 20) / 10).toFixed(1);
   const epNum = anime.episodes || anime.total_episodes || (anime.year ? `${(parseInt(anime.id.slice(-1) || "1", 16) % 12) + 1}` : "8");
 
+  if (layout === "grid6") {
+    return (
+      <div className="w-full group select-none flex flex-col">
+        <Link href={`/anime/${anime.id}`} className="block relative">
+          <div className="aspect-[2/3] w-full rounded-lg sm:rounded-xl overflow-hidden relative shadow-md bg-[#0d1020] border border-white/5 group-hover:border-purple-500/50 transition-all duration-300">
+            {/* Green Status Badge */}
+            <div className="absolute top-1 right-1 z-10">
+              <span className="bg-[#22c55e] text-white text-[7px] sm:text-[9px] font-bold px-1 py-0.2 rounded shadow-sm">
+                يعرض
+              </span>
+            </div>
+
+            {/* Anime Poster Image */}
+            {anime.poster ? (
+              <img
+                src={anime.poster}
+                alt={anime.title}
+                loading="lazy"
+                referrerPolicy="no-referrer"
+                className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+              />
+            ) : (
+              <div className="w-full h-full flex flex-col items-center justify-center text-gray-500 bg-[#121629]">
+                <Film size={16} />
+              </div>
+            )}
+
+            {/* Bottom Overlay on Poster: Episode + Three Dots */}
+            <div className="absolute bottom-0 inset-x-0 p-1 bg-gradient-to-t from-black/95 via-black/60 to-transparent flex items-center justify-between text-white">
+              <span className="text-[7.5px] sm:text-[9.5px] font-bold text-gray-100 drop-shadow truncate">
+                حـ {epNum}
+              </span>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  onClickMore?.(anime);
+                }}
+                className="p-0.5 text-gray-300 hover:text-white rounded-full transition-colors"
+                title="خيارات"
+              >
+                <MoreVertical size={10} />
+              </button>
+            </div>
+          </div>
+        </Link>
+
+        {/* Copy below poster */}
+        <Link href={`/anime/${anime.id}`} className="block pt-1 text-center">
+          <h3 className="text-[9px] sm:text-xs font-bold text-white truncate hover:text-purple-400 transition-colors" title={anime.title}>
+            {anime.title}
+          </h3>
+          <div className="flex items-center justify-center gap-0.5 text-[8px] sm:text-[10px] text-amber-400 font-bold mt-0.5">
+            <Star size={9} className="fill-amber-400 text-amber-400" />
+            <span>{displayRating}</span>
+          </div>
+        </Link>
+      </div>
+    );
+  }
+
+  if (layout === "grid3") {
+    return (
+      <div className="w-full group select-none flex flex-col">
+        <Link href={`/anime/${anime.id}`} className="block relative">
+          <div className="aspect-[2/3] w-full rounded-xl overflow-hidden relative shadow-md bg-[#0d1020] border border-white/5 group-hover:border-purple-500/50 transition-all duration-300">
+            <div className="absolute top-1.5 right-1.5 z-10">
+              <span className="bg-[#22c55e] text-white text-[8px] sm:text-[10px] font-bold px-1.5 py-0.5 rounded shadow-sm">
+                يعرض حالياً
+              </span>
+            </div>
+            {anime.poster ? (
+              <img
+                src={anime.poster}
+                alt={anime.title}
+                loading="lazy"
+                referrerPolicy="no-referrer"
+                className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+              />
+            ) : (
+              <div className="w-full h-full flex flex-col items-center justify-center text-gray-500 bg-[#121629]">
+                <Film size={22} />
+              </div>
+            )}
+            <div className="absolute bottom-0 inset-x-0 p-1.5 bg-gradient-to-t from-black/95 via-black/60 to-transparent flex items-center justify-between text-white">
+              <span className="text-[10px] font-bold text-gray-100 drop-shadow">
+                الحلقة : {epNum}
+              </span>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  onClickMore?.(anime);
+                }}
+                className="p-1 text-gray-300 hover:text-white rounded-full transition-colors"
+                title="خيارات"
+              >
+                <MoreVertical size={12} />
+              </button>
+            </div>
+          </div>
+        </Link>
+        <Link href={`/anime/${anime.id}`} className="block pt-1.5">
+          <h3 className="text-xs sm:text-[13px] font-bold text-white truncate hover:text-purple-400 transition-colors" title={anime.title}>
+            {anime.title}
+          </h3>
+          <div className="flex items-center gap-1 mt-0.5 text-[10px] text-gray-400">
+            <Star size={11} className="text-amber-400 fill-amber-400" />
+            <span className="font-bold text-gray-200">{displayRating}</span>
+          </div>
+        </Link>
+      </div>
+    );
+  }
+
+  // layout === "scroll" (Horizontal scrolling shelf with compact cards)
   return (
-    <div className="w-[135px] shrink-0 sm:w-auto group select-none flex flex-col snap-start">
+    <div className="w-[95px] sm:w-[130px] shrink-0 group select-none flex flex-col snap-start">
       <Link href={`/anime/${anime.id}`} className="block relative">
-        <div className="h-[195px] sm:h-[185px] md:h-[210px] w-full rounded-2xl overflow-hidden relative shadow-lg bg-[#0d1020] border border-white/5 group-hover:border-purple-500/50 transition-all duration-300">
-          {/* Green Status Badge */}
-          <div className="absolute top-2.5 right-2.5 z-10">
-            <span className="bg-[#22c55e] text-white text-[10px] font-bold px-2 py-0.5 rounded-md shadow-md backdrop-blur-sm">
-              يعرض حاليا
+        <div className="h-[140px] sm:h-[185px] md:h-[210px] w-full rounded-xl sm:rounded-2xl overflow-hidden relative shadow-lg bg-[#0d1020] border border-white/5 group-hover:border-purple-500/50 transition-all duration-300">
+          <div className="absolute top-1.5 right-1.5 z-10">
+            <span className="bg-[#22c55e] text-white text-[8px] sm:text-[10px] font-bold px-1.5 py-0.5 rounded shadow-sm">
+              يعرض
             </span>
           </div>
-
-          {/* Anime Poster Image */}
           {anime.poster ? (
             <img
               src={anime.poster}
@@ -174,15 +297,12 @@ function MobileAnimeCard({ anime, onClickMore }: { anime: AnimeCardType; onClick
             />
           ) : (
             <div className="w-full h-full flex flex-col items-center justify-center text-gray-500 gap-1 bg-[#121629]">
-              <Film size={26} />
-              <span className="text-[10px]">لا توجد صورة</span>
+              <Film size={22} />
             </div>
           )}
-
-          {/* Bottom Overlay on Poster: Episode + Three Dots */}
-          <div className="absolute bottom-0 inset-x-0 p-2.5 bg-gradient-to-t from-black/95 via-black/60 to-transparent flex items-center justify-between text-white">
-            <span className="text-[11px] font-bold text-gray-100 drop-shadow">
-              الحلقة : {epNum}
+          <div className="absolute bottom-0 inset-x-0 p-1.5 bg-gradient-to-t from-black/95 via-black/60 to-transparent flex items-center justify-between text-white">
+            <span className="text-[10px] sm:text-[11px] font-bold text-gray-100 drop-shadow">
+              حلقة : {epNum}
             </span>
             <button
               type="button"
@@ -191,24 +311,21 @@ function MobileAnimeCard({ anime, onClickMore }: { anime: AnimeCardType; onClick
                 e.stopPropagation();
                 onClickMore?.(anime);
               }}
-              className="p-1 text-gray-300 hover:text-white hover:bg-white/10 rounded-full transition-colors"
-              title="خيارات إضافية"
+              className="p-1 text-gray-300 hover:text-white rounded-full transition-colors"
+              title="خيارات"
             >
-              <MoreVertical size={14} />
+              <MoreVertical size={12} />
             </button>
           </div>
         </div>
       </Link>
-
-      {/* Copy below poster */}
-      <Link href={`/anime/${anime.id}`} className="block pt-2">
-        <h3 className="text-[13px] font-bold text-white truncate hover:text-purple-400 transition-colors" title={anime.title}>
+      <Link href={`/anime/${anime.id}`} className="block pt-1.5">
+        <h3 className="text-xs sm:text-[13px] font-bold text-white truncate hover:text-purple-400 transition-colors" title={anime.title}>
           {anime.title}
         </h3>
-        <div className="flex items-center gap-1.5 mt-0.5 text-[11px] text-gray-400">
-          <Star size={12} className="text-amber-400 fill-amber-400" />
+        <div className="flex items-center gap-1 mt-0.5 text-[10px] text-gray-400">
+          <Star size={11} className="text-amber-400 fill-amber-400" />
           <span className="font-bold text-gray-200">{displayRating}</span>
-          <span className="text-[10px] text-gray-400">({formatVotes(anime.rating)})</span>
         </div>
       </Link>
     </div>
@@ -224,6 +341,19 @@ export default function Home() {
   const [activeTab, setActiveTab] = useState<"home" | "favorites" | "genres" | "account">("home");
   const [selectedGenreName, setSelectedGenreName] = useState<string | null>(null);
   const [quickActionAnime, setQuickActionAnime] = useState<AnimeCardType | null>(null);
+  const [rowLayout, setRowLayout] = useState<"grid6" | "scroll" | "grid3">(() => (typeof window !== "undefined" && (localStorage.getItem("neonflix-row-layout") as any)) || "grid6");
+  const [activeSource, setActiveSource] = useState(() => (typeof window !== "undefined" && localStorage.getItem("neonflix-source")) || "cluster");
+
+  const changeSource = (src: string) => {
+    try { localStorage.setItem("neonflix-source", src); } catch (_) {}
+    setActiveSource(src);
+    window.location.reload();
+  };
+
+  const handleSetRowLayout = (layout: "grid6" | "scroll" | "grid3") => {
+    setRowLayout(layout);
+    try { localStorage.setItem("neonflix-row-layout", layout); } catch (_) {}
+  };
 
   // Queries
   const latest = trpc.anime.latest.useQuery({ limit: 36 });
@@ -326,6 +456,63 @@ export default function Home() {
           <Search size={22} />
         </button>
       </header>
+
+      {/* Top Source Switcher & View Layout Selector Bar */}
+      <div className="bg-[#080b18] border-b border-white/5 px-3 py-2 flex items-center justify-between gap-2 overflow-x-auto no-scrollbar">
+        <div className="flex items-center gap-1.5 shrink-0">
+          {[
+            { id: "cluster", label: "Anime Cluster" },
+            { id: "witcher", label: "Anime Witcher" },
+            { id: "kawaii", label: "Anime Kawaii" },
+            { id: "animeify", label: "Animefy" },
+          ].map((src) => (
+            <button
+              key={src.id}
+              type="button"
+              onClick={() => changeSource(src.id)}
+              className={`px-2.5 py-1 rounded-lg text-[11px] font-bold whitespace-nowrap transition-all border ${
+                activeSource === src.id
+                  ? "bg-purple-600 text-white border-purple-400 shadow-md shadow-purple-600/30"
+                  : "bg-white/5 text-gray-300 border-white/5 hover:border-white/20 hover:text-white"
+              }`}
+            >
+              {src.label}
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-1 shrink-0 bg-black/40 p-1 rounded-lg border border-white/10 text-[10px]">
+          <button
+            type="button"
+            onClick={() => handleSetRowLayout("grid6")}
+            className={`px-2 py-0.5 rounded transition-all font-bold ${
+              rowLayout === "grid6" ? "bg-purple-600 text-white shadow-sm" : "text-gray-400 hover:text-white"
+            }`}
+            title="عرض 6 أنميات كاملة في صف واحد"
+          >
+            6 بالصف
+          </button>
+          <button
+            type="button"
+            onClick={() => handleSetRowLayout("scroll")}
+            className={`px-2 py-0.5 rounded transition-all font-bold ${
+              rowLayout === "scroll" ? "bg-purple-600 text-white shadow-sm" : "text-gray-400 hover:text-white"
+            }`}
+            title="شريط سحب أفقي"
+          >
+            شريط
+          </button>
+          <button
+            type="button"
+            onClick={() => handleSetRowLayout("grid3")}
+            className={`px-2 py-0.5 rounded transition-all font-bold ${
+              rowLayout === "grid3" ? "bg-purple-600 text-white shadow-sm" : "text-gray-400 hover:text-white"
+            }`}
+            title="شبكة 3 أعمدة"
+          >
+            3 أعمدة
+          </button>
+        </div>
+      </div>
 
       {/* Main Content Area */}
       <main className="flex-1 pb-24 max-w-4xl mx-auto w-full">
@@ -439,15 +626,40 @@ export default function Home() {
                   </div>
 
                   {/* Horizontal row of 6 anime */}
-                  <div className="flex gap-3 px-4 overflow-x-auto no-scrollbar scroll-smooth snap-x snap-mandatory sm:grid sm:grid-cols-6 sm:gap-3 sm:overflow-visible">
-                    {row.map((anime) => (
-                      <MobileAnimeCard
-                        key={anime.id}
-                        anime={anime}
-                        onClickMore={(a) => setQuickActionAnime(a)}
-                      />
-                    ))}
-                  </div>
+                  {rowLayout === "grid6" ? (
+                    <div className="grid grid-cols-6 gap-1 px-1.5 sm:gap-2.5 sm:px-4">
+                      {row.map((anime) => (
+                        <MobileAnimeCard
+                          key={anime.id}
+                          anime={anime}
+                          layout="grid6"
+                          onClickMore={(a) => setQuickActionAnime(a)}
+                        />
+                      ))}
+                    </div>
+                  ) : rowLayout === "grid3" ? (
+                    <div className="grid grid-cols-3 gap-2 px-3 sm:grid-cols-6 sm:gap-3 sm:px-4">
+                      {row.map((anime) => (
+                        <MobileAnimeCard
+                          key={anime.id}
+                          anime={anime}
+                          layout="grid3"
+                          onClickMore={(a) => setQuickActionAnime(a)}
+                        />
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="flex gap-2.5 px-3 overflow-x-auto no-scrollbar scroll-smooth snap-x snap-mandatory">
+                      {row.map((anime) => (
+                        <MobileAnimeCard
+                          key={anime.id}
+                          anime={anime}
+                          layout="scroll"
+                          onClickMore={(a) => setQuickActionAnime(a)}
+                        />
+                      ))}
+                    </div>
+                  )}
                 </section>
               );
             })
@@ -528,15 +740,41 @@ export default function Home() {
                   <span className="text-[11px] font-medium text-gray-400">صف {rowIdx + 1}</span>
                 </div>
 
-                <div className="flex gap-3 px-4 overflow-x-auto no-scrollbar scroll-smooth snap-x snap-mandatory sm:grid sm:grid-cols-6 sm:gap-3 sm:overflow-visible">
-                  {row.map((anime) => (
-                    <MobileAnimeCard
-                      key={`pop-${anime.id}`}
-                      anime={anime}
-                      onClickMore={(a) => setQuickActionAnime(a)}
-                    />
-                  ))}
-                </div>
+                {/* Row of 6 anime */}
+                {rowLayout === "grid6" ? (
+                  <div className="grid grid-cols-6 gap-1 px-1.5 sm:gap-2.5 sm:px-4">
+                    {row.map((anime) => (
+                      <MobileAnimeCard
+                        key={`pop-${anime.id}`}
+                        anime={anime}
+                        layout="grid6"
+                        onClickMore={(a) => setQuickActionAnime(a)}
+                      />
+                    ))}
+                  </div>
+                ) : rowLayout === "grid3" ? (
+                  <div className="grid grid-cols-3 gap-2 px-3 sm:grid-cols-6 sm:gap-3 sm:px-4">
+                    {row.map((anime) => (
+                      <MobileAnimeCard
+                        key={`pop-${anime.id}`}
+                        anime={anime}
+                        layout="grid3"
+                        onClickMore={(a) => setQuickActionAnime(a)}
+                      />
+                    ))}
+                  </div>
+                ) : (
+                  <div className="flex gap-2.5 px-3 overflow-x-auto no-scrollbar scroll-smooth snap-x snap-mandatory">
+                    {row.map((anime) => (
+                      <MobileAnimeCard
+                        key={`pop-${anime.id}`}
+                        anime={anime}
+                        layout="scroll"
+                        onClickMore={(a) => setQuickActionAnime(a)}
+                      />
+                    ))}
+                  </div>
+                )}
               </section>
             );
           })}
@@ -654,7 +892,7 @@ export default function Home() {
                 <span>جاري البحث في قاعدة البيانات...</span>
               </div>
             ) : searchResults.data?.length ? (
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+              <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-2 sm:gap-3">
                 {searchResults.data.map((anime) => (
                   <Link
                     key={anime.id}
@@ -662,7 +900,7 @@ export default function Home() {
                     onClick={() => setSearchOpen(false)}
                     className="flex flex-col bg-[#0e1122] rounded-xl overflow-hidden border border-white/5 hover:border-purple-500/40 transition-colors"
                   >
-                    <div className="h-[180px] w-full bg-[#14182e] relative">
+                    <div className="h-[140px] sm:h-[180px] w-full bg-[#14182e] relative">
                       {anime.poster ? (
                         <img src={anime.poster} alt={anime.title} className="w-full h-full object-cover" />
                       ) : (
@@ -671,14 +909,14 @@ export default function Home() {
                         </div>
                       )}
                       {anime.rating && (
-                        <span className="absolute bottom-2 right-2 bg-black/80 text-amber-400 text-[10px] font-bold px-1.5 py-0.5 rounded">
+                        <span className="absolute bottom-1.5 right-1.5 bg-black/80 text-amber-400 text-[9px] font-bold px-1 py-0.5 rounded">
                           ★ {anime.rating}
                         </span>
                       )}
                     </div>
-                    <div className="p-2">
-                      <h4 className="text-xs font-bold text-white truncate">{anime.title}</h4>
-                      <p className="text-[10px] text-gray-400 mt-0.5">{anime.year || "أنمي"}</p>
+                    <div className="p-1.5 text-center">
+                      <h4 className="text-[10px] sm:text-xs font-bold text-white truncate">{anime.title}</h4>
+                      <p className="text-[9px] text-gray-400 mt-0.5">{anime.year || "أنمي"}</p>
                     </div>
                   </Link>
                 ))}
@@ -736,7 +974,7 @@ export default function Home() {
                 </Button>
               </div>
             ) : (
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+              <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-2 sm:gap-3">
                 {favorites.data.map((fav) => (
                   <Link
                     key={fav.contentId}
@@ -744,7 +982,7 @@ export default function Home() {
                     onClick={() => setActiveTab("home")}
                     className="flex flex-col bg-[#0e1122] rounded-xl overflow-hidden border border-white/5 hover:border-purple-500/40 transition-colors"
                   >
-                    <div className="h-[190px] w-full bg-[#14182e] relative">
+                    <div className="h-[140px] sm:h-[190px] w-full bg-[#14182e] relative">
                       {fav.poster ? (
                         <img src={fav.poster} alt={fav.title} className="w-full h-full object-cover" />
                       ) : (
@@ -753,8 +991,8 @@ export default function Home() {
                         </div>
                       )}
                     </div>
-                    <div className="p-2.5">
-                      <h4 className="text-xs font-bold text-white truncate">{fav.title}</h4>
+                    <div className="p-1.5 text-center">
+                      <h4 className="text-[10px] sm:text-xs font-bold text-white truncate">{fav.title}</h4>
                     </div>
                   </Link>
                 ))}
@@ -782,7 +1020,7 @@ export default function Home() {
             </button>
           </div>
           <div className="flex-1 overflow-y-auto py-4">
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+            <div className="grid grid-cols-3 sm:grid-cols-4 gap-2 sm:gap-3">
               {[
                 "أكشن", "مغامرات", "كوميديا", "إيسيكاي", "خيال", "خارق للطبيعة",
                 "شونين", "سينين", "شوجو", "دراما", "غموض", "رعب", "نفسي",
@@ -795,10 +1033,9 @@ export default function Home() {
                     handleSelectGenre(genre);
                     setActiveTab("home");
                   }}
-                  className="p-4 rounded-xl bg-[#0e1122] hover:bg-purple-600/20 border border-white/5 hover:border-purple-500/50 text-right font-bold text-sm text-gray-200 hover:text-white transition-all flex items-center justify-between"
+                  className="p-2.5 sm:p-4 rounded-xl bg-[#0e1122] hover:bg-purple-600/20 border border-white/5 hover:border-purple-500/50 text-center font-bold text-xs sm:text-sm text-gray-200 hover:text-white transition-all flex items-center justify-center"
                 >
                   <span>{genre}</span>
-                  <ChevronLeft size={16} className="text-gray-500" />
                 </button>
               ))}
             </div>
@@ -884,11 +1121,67 @@ export default function Home() {
             </div>
 
             {/* Provider Switcher Info */}
+            <div className="p-3 bg-[#111428] rounded-xl border border-white/5 mb-3">
+              <span className="text-[10px] text-gray-400 block mb-2 font-bold">مصدر الأنمي (سيرفر المحتوى):</span>
+              <div className="grid grid-cols-2 gap-1.5 mb-2">
+                {[
+                  { id: "cluster", label: "Anime Cluster" },
+                  { id: "witcher", label: "Anime Witcher" },
+                  { id: "kawaii", label: "Anime Kawaii" },
+                  { id: "animeify", label: "Animefy" },
+                ].map((s) => (
+                  <button
+                    key={s.id}
+                    onClick={() => {
+                      changeSource(s.id);
+                      setMenuOpen(false);
+                    }}
+                    className={`py-1.5 px-2 text-[11px] font-bold rounded-lg transition-all text-center ${
+                      activeSource === s.id
+                        ? "bg-purple-600 text-white shadow-md shadow-purple-600/30"
+                        : "bg-white/5 text-gray-300 hover:bg-white/10"
+                    }`}
+                  >
+                    {s.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Shelf Display Layout Switcher */}
             <div className="p-3 bg-[#111428] rounded-xl border border-white/5 mb-4">
-              <span className="text-[10px] text-gray-400 block mb-1">المصدر الحالي:</span>
-              <div className="flex items-center justify-between text-xs font-bold text-purple-300">
-                <span>Anime Cluster</span>
-                <span className="text-[9px] bg-purple-500/20 text-purple-300 px-1.5 py-0.5 rounded">افتراضي</span>
+              <span className="text-[10px] text-gray-400 block mb-2 font-bold">طريقة عرض القوائم:</span>
+              <div className="grid grid-cols-3 gap-1">
+                <button
+                  onClick={() => handleSetRowLayout("grid6")}
+                  className={`py-1 text-[11px] font-bold rounded-lg transition-all text-center ${
+                    rowLayout === "grid6"
+                      ? "bg-purple-600 text-white shadow-md"
+                      : "bg-white/5 text-gray-300 hover:bg-white/10"
+                  }`}
+                >
+                  6 بالصف
+                </button>
+                <button
+                  onClick={() => handleSetRowLayout("scroll")}
+                  className={`py-1 text-[11px] font-bold rounded-lg transition-all text-center ${
+                    rowLayout === "scroll"
+                      ? "bg-purple-600 text-white shadow-md"
+                      : "bg-white/5 text-gray-300 hover:bg-white/10"
+                  }`}
+                >
+                  شريط أفقي
+                </button>
+                <button
+                  onClick={() => handleSetRowLayout("grid3")}
+                  className={`py-1 text-[11px] font-bold rounded-lg transition-all text-center ${
+                    rowLayout === "grid3"
+                      ? "bg-purple-600 text-white shadow-md"
+                      : "bg-white/5 text-gray-300 hover:bg-white/10"
+                  }`}
+                >
+                  3 أعمدة
+                </button>
               </div>
             </div>
 
