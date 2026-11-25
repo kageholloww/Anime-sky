@@ -184,7 +184,25 @@ async function witcherFetch(url, options = {}) { const response = await axios({ 
 async function witcherAlgolia(index, params) { return witcherFetch(`https://${WITCHER.algoliaAppId}-dsn.algolia.net/1/indexes/${encodeURIComponent(index)}/query`, { method: "POST", headers: { "X-Algolia-Application-Id": WITCHER.algoliaAppId, "X-Algolia-API-Key": WITCHER.algoliaApiKey, "Content-Type": "application/json" }, data: { params } }); }
 function witcherEpisodes(doc) { const values = doc?.fields?.episodes?.arrayValue?.values || []; return values.map((item, index) => { const f = item?.mapValue?.fields || {}; const id = wfString(f.doc_id); if (!id) return null; const translated = wfMap(f.title_translated); return { id, title: wfString(translated.ar) || wfString(f.name) || `الحلقة ${id}`, number: Number(wfValue(f.number)) || index + 1, duration: "", imageUrl: wfString(f.thumb_uri) || null }; }).filter(Boolean).sort((a, b) => a.number - b.number); }
 function witcherCard(hit) { const details = hit.details || {}; const rawRating = typeof hit.rating === "number" || typeof hit.rating === "string" ? hit.rating : (details.mal_mean ?? details.rating ?? ""); const numericRating = parseFloat(String(rawRating).replace(",", ".")); return { id: String(hit.objectID || hit.path || ""), title: String(hit.name || hit.english_title || "Anime Witcher"), englishTitle: String(hit.english_title || ""), poster: hit.poster_uri || hit.poster?.medium || null, year: String(details.year || ""), rating: Number.isFinite(numericRating) && numericRating > 0 ? numericRating.toFixed(1) : "", episodes: "", airingDay: String(details.state || ""), genres: Array.isArray(hit.tags) ? hit.tags.map(String) : [], description: String(hit.story || ""), source: "witcher" }; }
-async function witcherRefreshKeys() { try { const settings = await witcherFetch(wfDocUrl("Settings/constants")); const root = settings?.fields || {}; const search = wfMap(root.search_settings); if (wfString(search.api_key)) WITCHER.algoliaApiKey = wfString(search.api_key); if (wfString(search.app_id_v3) || wfString(search.app_id)) WITCHER.algoliaAppId = wfString(search.app_id_v3) || wfString(search.app_id); } catch (_) {} }
+const witcherCache = {
+  keysAt: 0,
+  latest: null,
+  latestAt: 0,
+  popular: null,
+  popularAt: 0,
+};
+
+async function witcherRefreshKeys() {
+  if (Date.now() - witcherCache.keysAt < 5 * 60_000) return;
+  try {
+    const settings = await witcherFetch(wfDocUrl("Settings/constants"));
+    const root = settings?.fields || {};
+    const search = wfMap(root.search_settings);
+    if (wfString(search.api_key)) WITCHER.algoliaApiKey = wfString(search.api_key);
+    if (wfString(search.app_id_v3) || wfString(search.app_id)) WITCHER.algoliaAppId = wfString(search.app_id_v3) || wfString(search.app_id);
+    witcherCache.keysAt = Date.now();
+  } catch (_) {}
+}
 // Robust numeric date sort — handles unix seconds, unix ms, and ISO strings.
 function dateMs(value) {
   if (value == null) return 0;
@@ -464,6 +482,9 @@ async function witcherRecommend(selectedGenres = [], limit = 5, excludeIds = [])
 // episode timestamps from the official Android client) with multi-strategy
 // fallback to the legacy search path and the local catalog.
 async function witcherLatest(limit = 24) {
+  if (witcherCache.latest && Date.now() - witcherCache.latestAt < 60_000) {
+    return witcherCache.latest.slice(0, limit);
+  }
   let items = [];
 
   // 1) Best path: dedicated recent-episode index — gives actual newest
@@ -518,9 +539,7 @@ async function witcherLatest(limit = 24) {
       }));
   }
 
-  return items.slice(0, limit).map(hit => {
-    // For items from the legacy / fallback path (no `id`/`title` yet),
-    // route through witcherCard to normalise.
+  const normalized = items.slice(0, limit).map(hit => {
     if (!hit.id) {
       const card = witcherCard(hit);
       card.episodes = String(hit.episodes_count || card.episodes || "");
@@ -528,11 +547,31 @@ async function witcherLatest(limit = 24) {
       card.lastUpdated = pickDateMs(hit) || null;
       return card;
     }
-    // Items already normalised from the `recent` index.
     hit.episodes = hit.episodes || "";
     hit.totalSeasons = hit.totalSeasons || "";
     return hit;
   });
+  if (normalized.length) {
+    witcherCache.latest = normalized;
+    witcherCache.latestAt = Date.now();
+  }
+  return normalized;
+}
+
+async function witcherPopular(limit = 24) {
+  if (witcherCache.popular && Date.now() - witcherCache.popularAt < 120_000) {
+    return witcherCache.popular.slice(0, limit);
+  }
+  try {
+    const items = await witcherSearch("", 0, Math.max(24, limit));
+    const sorted = items.slice().sort((a, b) => parseRating(b.rating) - parseRating(a.rating));
+    if (sorted.length) {
+      witcherCache.popular = sorted;
+      witcherCache.popularAt = Date.now();
+      return sorted.slice(0, limit);
+    }
+  } catch (_) {}
+  return witcherLatest(limit);
 }
 
 // Returns actual recent episodes across all anime (newest first).
@@ -592,6 +631,10 @@ async function witcherRecentEpisodes(limit = 12) {
   return enriched.slice(0, limit);
 }
 async function witcherLoad(id) { const anime = (await witcherAlgolia("series", `filters=objectID:"${String(id).replaceAll('"', '\\"')}"`)).hits?.[0] || {}; const clean = String(anime.doc_ref || anime.path || id).replace(/^.*anime_list\//, "").replace(/^\/+/, ""); const doc = await witcherFetch(wfDocUrl(`anime_list/${clean}/episodes_summery/summery`)); const eps = witcherEpisodes(doc); const card = witcherCard({ ...anime, objectID: id }); return { ...card, episodes: String(eps.length), episodesList: eps, animePath: clean }; }
+async function witcherSeasons(id) {
+  const item = await witcherLoad(id);
+  return [{ id: `witcher-${item.id || id}`, title: "الموسم 1", number: 1, episodes: item.episodesList || [] }];
+}
 async function witcherResolveEpisode(title, number, id = "") {
   const wantedNumber = Number(number) || 1;
   const rawId = String(id || "").trim();
@@ -1201,7 +1244,7 @@ const KAWAII = {
   appKey: process.env.KAWAII_APP_KEY || "b3acdcb2e7ef4f958ea238b31466b367",
   userAgent: "okhttp/4.12.0",
 };
-const KAWAII_LIST_QUERY = `query ($page:Int,$perPage:Int,$search:String,$genres:[String],$sort:[MediaSort]) { Page(page:$page,perPage:$perPage) { pageInfo { currentPage lastPage hasNextPage total } media(type:ANIME,search:$search,genre_in:$genres,sort:$sort,isAdult:false) { id idMal title { romaji english native } description coverImage { large extraLarge } genres tags { name } format status episodes duration season seasonYear averageScore popularity trending favourites startDate { year month day } endDate { year month day } studios(isMain:true) { edges { node { name } } } nextAiringEpisode { episode airingAt timeUntilAiring } } } }`;
+const KAWAII_LIST_QUERY = `query ($page:Int,$perPage:Int,$search:String,$genres:[String],$tags:[String],$sort:[MediaSort]) { Page(page:$page,perPage:$perPage) { pageInfo { currentPage lastPage hasNextPage total } media(type:ANIME,search:$search,genre_in:$genres,tag_in:$tags,sort:$sort,isAdult:false) { id idMal title { romaji english native } description coverImage { large extraLarge } genres tags { name } format status episodes duration season seasonYear averageScore popularity trending favourites startDate { year month day } endDate { year month day } studios(isMain:true) { edges { node { name } } } nextAiringEpisode { episode airingAt timeUntilAiring } } } }`;
 const KAWAII_DETAIL_QUERY = `query ($id:Int) { Media(id:$id,type:ANIME) { id idMal title { romaji english native } description coverImage { large extraLarge } genres tags { name } format status episodes duration season seasonYear averageScore popularity trending favourites startDate { year month day } endDate { year month day } studios(isMain:true) { edges { node { name } } } nextAiringEpisode { episode airingAt timeUntilAiring } } }`;
 async function kawaiiGraph(query, variables = {}, tries = 5) {
   let last;
@@ -1243,14 +1286,57 @@ function kawaiiCard(item = {}) {
   const title = kawaiiTitle(item), poster = item.coverImage?.extraLarge || item.coverImage?.large || null;
   return { id: String(item.id || ""), content_id: String(item.id || ""), contentId: String(item.id || ""), title, content_title: title, name: title, englishTitle: String(item.title?.english || ""), poster, poster_anilist_url: poster, verticle_poster: poster, year: String(item.seasonYear || item.startDate?.year || ""), release_year: String(item.seasonYear || item.startDate?.year || ""), rating: item.averageScore ? String(Number(item.averageScore) / 10) : "", ratings: item.averageScore ? String(Number(item.averageScore) / 10) : "", episodes: String(item.episodes || item.nextAiringEpisode?.episode || ""), total_episodes: String(item.episodes || item.nextAiringEpisode?.episode || ""), airingDay: String(item.status || ""), genres: Array.isArray(item.genres) ? item.genres : [], genre_name: Array.isArray(item.genres) ? item.genres : [], tags: Array.isArray(item.tags) ? item.tags.map(tag => String(tag?.name || tag || "")) : [], description: String(item.description || "").replace(/<[^>]+>/g, "").trim(), duration: String(item.duration || ""), source: "kawaii" };
 }
-const KAWAII_GENRE_MAP = { "أكشن":"Action", "اكشن":"Action", "مغامرات":"Adventure", "كوميديا":"Comedy", "دراما":"Drama", "خيال":"Fantasy", "رومانسي":"Romance", "رعب":"Horror", "غموض":"Mystery", "نفسي":"Psychological", "خيال علمي":"Sci-Fi", "رياضة":"Sports", "مدرسي":"School", "خارق للطبيعة":"Supernatural", "إيسيكاي":"Isekai", "ايسيكاي":"Isekai", "إيتشي":"Ecchi", "ايتشي":"Ecchi", "شونين":"Shounen", "شوجو":"Shoujo", "سينين":"Seinen" };
-async function kawaiiSearch(q = "", limit = 24, genres = [], page = 1) {
-  const selectedGenres = (Array.isArray(genres) ? genres : String(genres || "").split(",")).map(String).map(x => x.trim()).filter(Boolean).map(x => KAWAII_GENRE_MAP[x] || x);
-  const tagOnly = selectedGenres.some(x => x === "Isekai");
-  const queryGenres = tagOnly ? selectedGenres.filter(x => x !== "Isekai") : selectedGenres;
-  const d = await kawaiiGraph(KAWAII_LIST_QUERY, { page: Math.max(1, Number(page) || 1), perPage: Math.min(50, Math.max(1, Number(limit) || 24)), search: String(q || "").trim() || undefined, genres: queryGenres.length ? queryGenres : undefined, sort: q ? ["SEARCH_MATCH"] : ["TRENDING_DESC"] });
-  let media = (d?.Page?.media || []).map(kawaiiCard).filter(x => x.id);
-  if (tagOnly) media = media.filter(x => (x.tags || []).some(tag => normalizeGenreText(tag) === "isekai"));
+const KAWAII_GENRE_MAP = {
+  "أكشن":"Action", "اكشن":"Action",
+  "مغامرات":"Adventure", "مغامرة":"Adventure",
+  "كوميديا":"Comedy", "كوميدي":"Comedy",
+  "دراما":"Drama",
+  "خيال":"Fantasy",
+  "رومانسي":"Romance", "رومنسي":"Romance",
+  "رعب":"Horror",
+  "غموض":"Mystery",
+  "نفسي":"Psychological",
+  "خيال علمي":"Sci-Fi",
+  "رياضة":"Sports",
+  "خارق للطبيعة":"Supernatural",
+  "إيتشي":"Ecchi", "ايتشي":"Ecchi",
+  "آلات / ميكا":"Mecha", "ميكا":"Mecha",
+  "موسيقى":"Music",
+  "شريحة من الحياة":"Slice of Life",
+  "إثارة":"Thriller", "اثارة":"Thriller",
+  "سحر":"Mahou Shoujo",
+  "إيسيكاي":"TAG:Isekai", "ايسيكاي":"TAG:Isekai",
+  "شونين":"TAG:Shounen",
+  "شوجو":"TAG:Shoujo",
+  "سينين":"TAG:Seinen",
+  "مدرسي":"TAG:School",
+  "شياطين":"TAG:Demons",
+  "تاريخي":"TAG:Historical",
+  "فنون قتال":"TAG:Martial Arts",
+  "قوى خارقة":"TAG:Super Power",
+  "حريم":"TAG:Harem",
+  "مصاصي دماء":"TAG:Vampire",
+  "جريمة":"TAG:Crime",
+  "ألعاب مميتة":"TAG:Survival",
+};
+async function kawaiiSearch(q = "", limit = 24, genres = [], page = 1, customSort = null) {
+  const mapped = (Array.isArray(genres) ? genres : String(genres || "").split(","))
+    .map(String)
+    .map(x => x.trim())
+    .filter(Boolean)
+    .map(x => KAWAII_GENRE_MAP[x] || x);
+  const queryTags = mapped.filter(x => x.startsWith("TAG:")).map(x => x.slice(4));
+  const queryGenres = mapped.filter(x => !x.startsWith("TAG:"));
+  const sort = customSort || (q ? ["SEARCH_MATCH"] : (queryGenres.length || queryTags.length ? ["POPULARITY_DESC"] : ["TRENDING_DESC"]));
+  const d = await kawaiiGraph(KAWAII_LIST_QUERY, {
+    page: Math.max(1, Number(page) || 1),
+    perPage: Math.min(50, Math.max(1, Number(limit) || 24)),
+    search: String(q || "").trim() || undefined,
+    genres: queryGenres.length ? queryGenres : undefined,
+    tags: queryTags.length ? queryTags : undefined,
+    sort,
+  });
+  const media = (d?.Page?.media || []).map(kawaiiCard).filter(x => x.id);
   return Promise.all(media.map(kawaiiDecorate));
 }
 async function kawaiiRecommend(selectedGenres = [], limit = 5, excludeIds = []) {
@@ -1336,6 +1422,8 @@ async function animeifyPost(endpoint, params = {}) {
   return data;
 }
 
+const animeifyCardCache = new Map();
+
 function animeifyCard(a = {}) {
   const animeId = String(a.AnimeId || a.anime_id || a.Id || "");
   const title = a.AR_Title?.trim() || a.Synonyms?.trim() || a.EN_Title?.trim() || "أنمي";
@@ -1348,7 +1436,7 @@ function animeifyCard(a = {}) {
   const year = (a.Premiered || "").match(/\d{4}/)?.[0] || "";
   const desc = String(a.Plot || a.Story || "").replace(/<[^>]+>/g, "").trim();
 
-  return {
+  const card = {
     id: animeId,
     content_id: animeId,
     contentId: animeId,
@@ -1371,6 +1459,10 @@ function animeifyCard(a = {}) {
     description: desc,
     source: "animeify",
   };
+  if (animeId && (a.AR_Title || a.EN_Title || a.Thumbnail)) {
+    animeifyCardCache.set(animeId, card);
+  }
+  return card;
 }
 
 async function animeifyLatest(limit = 24) {
@@ -1395,6 +1487,113 @@ async function animeifyLatest(limit = 24) {
     return unique;
   } catch (err) {
     console.error("[Animefy Latest Error]", err.message);
+    return [];
+  }
+}
+
+async function animeifyPopular(limit = 24) {
+  try {
+    const raw = await animeifyPost("anime/load_anime_list_v2.php", {
+      UserId: "0",
+      Language: "AR",
+      FilterType: "",
+      FilterData: "",
+      Type: "SERIES",
+      From: "0",
+    });
+    const results = Array.isArray(raw) ? raw : [];
+    const sorted = results.slice().sort((a, b) => (parseFloat(b.Score || "0") || 0) - (parseFloat(a.Score || "0") || 0));
+    return sorted.slice(0, limit).map(animeifyCard);
+  } catch (err) {
+    console.error("[Animefy Popular Error]", err.message);
+    return animeifyLatest(limit);
+  }
+}
+
+const ANIMEIFY_GENRE_RAW = {
+  "أكشن": "Action",
+  "مغامرات": "Adventure",
+  "مغامرة": "Adventure",
+  "كوميديا": "Comedy",
+  "كوميدي": "Comedy",
+  "دراما": "Drama",
+  "خيال": "Fantasy",
+  "رومانسي": "Romance",
+  "رومنسي": "Romance",
+  "غموض": "Mystery",
+  "رعب": "Horror",
+  "نفسي": "Psychological",
+  "سيكولوجي": "Psychological",
+  "إثارة": "Thriller",
+  "شونين": "Shounen",
+  "شوجو": "Shoujo",
+  "سينين": "Seinen",
+  "حريم": "Harem",
+  "إيتشي": "Ecchi",
+  "إيسيكاي": "Isekai",
+  "سحر": "Magic",
+  "شياطين": "Demons",
+  "قوى خارقة": "Super Power",
+  "خارق للطبيعة": "Supernatural",
+  "خيال علمي": "Sci-Fi",
+  "شريحة من الحياة": "Slice of Life",
+  "مدرسي": "School",
+  "رياضة": "Sports",
+  "تاريخي": "Historical",
+  "فنون قتال": "Martial Arts",
+  "موسيقى": "Music",
+  "آلات / ميكا": "Mecha",
+  "آلات": "Mecha",
+  "ميكا": "Mecha",
+  "جريمة": "Crime",
+  "مصاصي دماء": "Vampire",
+  "ألعاب مميتة": "Survival",
+};
+const ANIMEIFY_GENRE_MAP = Object.fromEntries(
+  Object.entries(ANIMEIFY_GENRE_RAW).map(([k, v]) => [normalizeGenreText(k), v])
+);
+
+async function animeifyByGenre(genre, limit = 30) {
+  const norm = normalizeGenreText(genre);
+  const enGenre = ANIMEIFY_GENRE_MAP[norm] || genre;
+  try {
+    const raw = await animeifyPost("anime/load_anime_list_v2.php", {
+      UserId: "0",
+      Language: "AR",
+      FilterType: "GENRE",
+      FilterData: enGenre,
+      Type: "SERIES",
+      From: "0",
+    });
+    const results = Array.isArray(raw) ? raw : [];
+    if (results.length) {
+      return results.slice(0, limit).map(animeifyCard);
+    }
+  } catch (err) {
+    console.error("[Animefy Genre Error]", err.message);
+  }
+  // Fallback for tags like Isekai not directly returned under FilterType=GENRE
+  try {
+    const pool = [];
+    for (let from = 0; from <= 40; from += 20) {
+      const raw = await animeifyPost("anime/load_anime_list_v2.php", {
+        UserId: "0",
+        Language: "AR",
+        FilterType: "",
+        FilterData: "",
+        Type: "SERIES",
+        From: String(from),
+      });
+      if (Array.isArray(raw)) pool.push(...raw);
+    }
+    const target = normalizeGenreText(enGenre);
+    const matched = pool.filter(item => {
+      const gStr = normalizeGenreText(item.Genres || "");
+      const plotStr = normalizeGenreText(item.Plot || "");
+      return gStr.includes(target) || gStr.includes(norm) || (norm === "ايسيكاي" && /isekai|عالممختلف|عالماخر/.test(gStr + plotStr));
+    });
+    return matched.slice(0, limit).map(animeifyCard);
+  } catch (_) {
     return [];
   }
 }
@@ -1427,12 +1626,19 @@ async function animeifyDetails(animeId) {
       AnimeRelationId: "",
     });
     const a = raw && typeof raw === "object" ? raw : {};
-    const card = animeifyCard({ AnimeId: animeId, ...a });
+    let cached = animeifyCardCache.get(String(animeId));
+    if (!cached) {
+      try {
+        await animeifyLatest(30);
+        cached = animeifyCardCache.get(String(animeId));
+      } catch (_) {}
+    }
+    const card = cached ? { ...cached } : animeifyCard({ AnimeId: animeId, ...a });
     if (a.Plot) card.description = String(a.Plot).replace(/<[^>]+>/g, "").trim();
     return card;
   } catch (err) {
     console.error("[Animefy Details Error]", err.message);
-    return { id: animeId, title: "Animefy", source: "animeify" };
+    return animeifyCardCache.get(String(animeId)) || { id: animeId, title: "Animefy", source: "animeify" };
   }
 }
 
@@ -1514,6 +1720,703 @@ async function animeifySources(episodeId) {
   }
 }
 
+// ─── Nova Sources: AnimeCloud & FaselHD (unified with Anime Sky format) ───
+const NOVA_BACKEND_BASE = process.env.NOVA_BACKEND_URL || "http://145.241.158.129:3112";
+const NOVA_TMDB_KEY = process.env.TMDB_API_KEY || "41aabdf0ff57d0da39d248d16a1b211f";
+const NOVA_TMDB_BASE = "https://api.themoviedb.org/3";
+const NOVA_TMDB_IMG = "https://image.tmdb.org/t/p/w500";
+const novaTmdbCache = new Map();
+
+const TMDB_GENRE_AR = {
+  10759: "أكشن",
+  28: "أكشن",
+  12: "مغامرات",
+  16: "أنمي",
+  35: "كوميديا",
+  80: "جريمة",
+  99: "وثائقي",
+  18: "دراما",
+  10751: "عائلي",
+  14: "خيال",
+  36: "تاريخي",
+  27: "رعب",
+  10402: "موسيقى",
+  9648: "غموض",
+  10749: "رومانسي",
+  878: "خيال علمي",
+  10765: "خيال",
+  53: "إثارة",
+  10752: "حرب",
+  10768: "تاريخي",
+};
+
+const TMDB_AR_TO_TV_GENRE = {
+  "اكشن": "10759",
+  "مغامرات": "10759",
+  "مغامرة": "10759",
+  "كوميديا": "35",
+  "كوميدي": "35",
+  "دراما": "18",
+  "خيال": "10765",
+  "ايسيكاي": "10765",
+  "سحر": "10765",
+  "خارقللطبيعة": "10765",
+  "خيالعلمي": "10765",
+  "غموض": "9648",
+  "رعب": "9648",
+  "اثارة": "9648",
+  "نفسي": "18",
+  "رومانسي": "18",
+  "رومنسي": "18",
+  "شونين": "10759",
+  "سينين": "18",
+  "شوجو": "18",
+  "مدرسي": "35",
+  "شياطين": "10765",
+  "قوىخارقة": "10759",
+  "شريحةمنالحياة": "35",
+  "جريمة": "80",
+  "تاريخي": "10768",
+  "موسيقى": "35",
+  "حريم": "35",
+  "ايتشي": "35",
+  "الاتميكا": "10765",
+  "فنونقتال": "10759",
+  "رياضة": "35",
+};
+
+const TMDB_AR_TO_MOVIE_GENRE = {
+  "اكشن": "28",
+  "مغامرات": "12",
+  "مغامرة": "12",
+  "كوميديا": "35",
+  "كوميدي": "35",
+  "دراما": "18",
+  "خيال": "14",
+  "ايسيكاي": "14",
+  "سحر": "14",
+  "خارقللطبيعة": "14",
+  "خيالعلمي": "878",
+  "غموض": "9648",
+  "رعب": "27",
+  "اثارة": "53",
+  "نفسي": "53",
+  "رومانسي": "10749",
+  "رومنسي": "10749",
+  "جريمة": "80",
+  "تاريخي": "36",
+  "موسيقى": "10402",
+  "شونين": "28",
+  "سينين": "18",
+  "شوجو": "10749",
+};
+
+function hasArabicText(value) {
+  return /[\u0600-\u06FF]/.test(String(value || ""));
+}
+
+async function novaTmdbGet(endpoint, params = {}) {
+  const query = new URLSearchParams({ api_key: NOVA_TMDB_KEY, ...params }).toString();
+  const url = `${NOVA_TMDB_BASE}/${endpoint}?${query}`;
+  const cached = novaTmdbCache.get(url);
+  if (cached && Date.now() - cached.at < 5 * 60_000) return cached.data;
+  const { data } = await axios.get(url, { timeout: 12000 });
+  if (novaTmdbCache.size > 300) {
+    const firstKey = novaTmdbCache.keys().next().value;
+    if (firstKey) novaTmdbCache.delete(firstKey);
+  }
+  novaTmdbCache.set(url, { data, at: Date.now() });
+  return data;
+}
+
+function novaPrefixFor(sourceName) {
+  return sourceName === "faselhd" ? "fh" : "ac";
+}
+
+function novaParseId(rawId, fallbackSource = "animecloud") {
+  const raw = String(rawId || "").trim();
+  const full = raw.match(/^(ac|fh)-(tv|movie)-(\d+)(?:-s(\d+)-e(\d+))?$/i);
+  if (full) {
+    return {
+      source: full[1].toLowerCase() === "fh" ? "faselhd" : "animecloud",
+      mediaType: full[2].toLowerCase(),
+      tmdbId: full[3],
+      season: Number(full[4] || 1),
+      episode: Number(full[5] || 1),
+    };
+  }
+  const numOnly = raw.match(/^(\d+)$/);
+  if (numOnly) {
+    return {
+      source: fallbackSource,
+      mediaType: "tv",
+      tmdbId: numOnly[1],
+      season: 1,
+      episode: 1,
+    };
+  }
+  return null;
+}
+
+function novaFormatBytes(size) {
+  const num = Number(size);
+  if (!Number.isFinite(num) || num <= 0) return String(size || "");
+  if (num >= 1024 ** 3) return `${(num / 1024 ** 3).toFixed(2)} GB`;
+  if (num >= 1024 ** 2) return `${Math.round(num / 1024 ** 2)} MB`;
+  return `${Math.round(num / 1024)} KB`;
+}
+
+function novaCard(item = {}, mediaType = "tv", sourceName = "animecloud", enItem = null) {
+  const prefix = novaPrefixFor(sourceName);
+  const tmdbId = String(item.id || enItem?.id || "");
+  const cardId = `${prefix}-${mediaType}-${tmdbId}`;
+  const arTitle = String(item.title || item.name || "").trim();
+  const enTitle = String(enItem?.title || enItem?.name || item.original_title || item.original_name || "").trim();
+  const title = (hasArabicText(arTitle) ? arTitle : (enTitle || arTitle)) || "بدون عنوان";
+  const posterPath = item.poster_path || enItem?.poster_path || item.backdrop_path || enItem?.backdrop_path;
+  const poster = posterPath ? `${NOVA_TMDB_IMG}${posterPath}` : null;
+  const releaseDate = String(item.release_date || item.first_air_date || enItem?.release_date || enItem?.first_air_date || "");
+  const year = releaseDate.length >= 4 ? releaseDate.slice(0, 4) : "";
+  const vote = Number(item.vote_average ?? enItem?.vote_average ?? 0);
+  const rating = vote > 0 ? vote.toFixed(1) : "";
+
+  const genreObjs = Array.isArray(item.genres) ? item.genres : [];
+  const genreIds = Array.isArray(item.genre_ids) ? item.genre_ids : [];
+  const mappedGenres = [
+    ...new Set([
+      ...genreObjs.map(g => TMDB_GENRE_AR[g.id] || g.name).filter(Boolean),
+      ...genreIds.map(id => TMDB_GENRE_AR[id]).filter(Boolean),
+    ]),
+  ].filter(g => g !== "أنمي" || genreIds.length <= 1).slice(0, 5);
+
+  const epCount = mediaType === "movie" ? "1" : String(item.number_of_episodes || "");
+  const statusMap = {
+    "Returning Series": "يعرض الآن",
+    "In Production": "قيد الإنتاج",
+    "Ended": "مكتمل",
+    "Canceled": "متوقف",
+    "Released": "فيلم",
+  };
+  const airingDay = mediaType === "movie" ? "فيلم" : (statusMap[item.status] || "");
+  const runtime = item.runtime || (Array.isArray(item.episode_run_time) ? item.episode_run_time[0] : 0);
+
+  return {
+    id: cardId,
+    content_id: cardId,
+    contentId: cardId,
+    title,
+    content_title: title,
+    name: title,
+    englishTitle: enTitle,
+    poster,
+    poster_anilist_url: poster,
+    verticle_poster: poster,
+    year,
+    release_year: year,
+    rating,
+    ratings: rating,
+    episodes: epCount,
+    total_episodes: epCount,
+    airingDay,
+    airing_day: airingDay,
+    genres: mappedGenres,
+    genre_name: mappedGenres,
+    description: String(item.overview || enItem?.overview || "").trim(),
+    duration: runtime ? `${runtime} د` : "",
+    ageRating: item.adult ? "18+" : "",
+    language: mediaType === "movie" ? "مترجم" : "اليابانية",
+    totalSeasons: mediaType === "movie" ? 1 : Number(item.number_of_seasons || 0),
+    source: sourceName,
+  };
+}
+
+async function novaFetchTmdbList(endpoint, params = {}, mediaType = "tv", sourceName = "animecloud", limit = 24, start = 0) {
+  const safeLimit = Math.min(80, Math.max(1, Number(limit) || 24));
+  const safeStart = Math.max(0, Number(start) || 0);
+  const startPage = Math.floor(safeStart / 20) + 1;
+  const pagesNeeded = Math.min(4, Math.max(1, Math.ceil((safeLimit + 8) / 20)));
+  const pageNums = Array.from({ length: pagesNeeded }, (_, i) => startPage + i);
+
+  const pageResults = await Promise.all(pageNums.map(async (p) => {
+    const [arRes, enRes] = await Promise.all([
+      novaTmdbGet(endpoint, { ...params, page: String(p), language: "ar-SA" }).catch(() => ({ results: [] })),
+      novaTmdbGet(endpoint, { ...params, page: String(p), language: "en-US" }).catch(() => ({ results: [] })),
+    ]);
+    const enById = new Map((enRes?.results || []).map(x => [String(x.id), x]));
+    const items = (arRes?.results?.length ? arRes.results : (enRes?.results || []))
+      .filter(x => x && x.id && !x.adult && (x.poster_path || x.backdrop_path));
+    return items.map(x => {
+      const type = x.media_type === "movie" || x.media_type === "tv" ? x.media_type : mediaType;
+      return novaCard(x, type, sourceName, enById.get(String(x.id)));
+    });
+  }));
+
+  const seen = new Set();
+  const deduped = [];
+  for (const list of pageResults) {
+    for (const card of list) {
+      if (!card?.id || seen.has(card.id)) continue;
+      seen.add(card.id);
+      deduped.push(card);
+    }
+  }
+  const offsetInPage = safeStart % 20;
+  return deduped.slice(offsetInPage, offsetInPage + safeLimit);
+}
+
+async function animecloudLatest(limit = 48, start = 0) {
+  const today = new Date().toISOString().slice(0, 10);
+  return novaFetchTmdbList("discover/tv", {
+    with_genres: "16",
+    with_original_language: "ja",
+    sort_by: "popularity.desc",
+    "first_air_date.lte": today,
+    "vote_count.gte": "10",
+  }, "tv", "animecloud", limit, start);
+}
+
+async function animecloudPopular(limit = 36, start = 0) {
+  return novaFetchTmdbList("discover/tv", {
+    with_genres: "16",
+    with_original_language: "ja",
+    sort_by: "vote_count.desc",
+    "vote_count.gte": "150",
+  }, "tv", "animecloud", limit, start);
+}
+
+async function animecloudSearch(query = "", limit = 24, start = 0) {
+  const q = String(query || "").trim();
+  if (!q) return animecloudLatest(limit, start);
+  const page = Math.floor(Math.max(0, Number(start) || 0) / 20) + 1;
+  const [arTv, enTv] = await Promise.all([
+    novaTmdbGet("search/tv", { query: q, language: "ar-SA", page: String(page), include_adult: "false" }).catch(() => ({ results: [] })),
+    novaTmdbGet("search/tv", { query: q, language: "en-US", page: String(page), include_adult: "false" }).catch(() => ({ results: [] })),
+  ]);
+  const enById = new Map((enTv?.results || []).map(x => [String(x.id), x]));
+  const raw = arTv?.results?.length ? arTv.results : (enTv?.results || []);
+  const animeOnly = raw.filter(x => (x.genre_ids || []).includes(16) || (x.origin_country || []).includes("JP"));
+  const chosen = (animeOnly.length ? animeOnly : raw).filter(x => x && x.id && !x.adult);
+  return chosen.slice(0, limit).map(x => novaCard(x, "tv", "animecloud", enById.get(String(x.id))));
+}
+
+async function animecloudByGenre(genre = "", limit = 30, start = 0) {
+  const norm = normalizeGenreText(genre);
+  const mappedId = TMDB_AR_TO_TV_GENRE[norm];
+  const withGenres = mappedId && mappedId !== "16" ? `16,${mappedId}` : "16";
+  return novaFetchTmdbList("discover/tv", {
+    with_genres: withGenres,
+    with_original_language: "ja",
+    sort_by: "popularity.desc",
+    "vote_count.gte": "20",
+  }, "tv", "animecloud", limit, start);
+}
+
+async function animecloudRandom(genres = []) {
+  const firstGenre = Array.isArray(genres) ? genres[0] : genres;
+  const start = Math.floor(Math.random() * 4) * 20;
+  const norm = normalizeGenreText(firstGenre || "");
+  const mappedId = TMDB_AR_TO_TV_GENRE[norm];
+  const withGenres = mappedId && mappedId !== "16" ? `16,${mappedId}` : "16";
+  const list = await novaFetchTmdbList("discover/tv", {
+    with_genres: withGenres,
+    with_original_language: "ja",
+    sort_by: "vote_count.desc",
+    "vote_count.gte": "50",
+  }, "tv", "animecloud", 20, start);
+  if (!list.length) return null;
+  return list[Math.floor(Math.random() * list.length)];
+}
+
+async function faselhdLatest(limit = 48, start = 0) {
+  const today = new Date().toISOString().slice(0, 10);
+  const animeCount = Math.ceil(limit * 0.65);
+  const movieCount = Math.max(0, limit - animeCount);
+  const [anime, movies] = await Promise.all([
+    novaFetchTmdbList("discover/tv", {
+      with_genres: "16",
+      with_original_language: "ja",
+      sort_by: "popularity.desc",
+      "first_air_date.lte": today,
+      "vote_count.gte": "15",
+    }, "tv", "faselhd", animeCount, start),
+    movieCount > 0 ? novaFetchTmdbList("discover/movie", {
+      sort_by: "popularity.desc",
+      "primary_release_date.lte": today,
+      "vote_count.gte": "300",
+    }, "movie", "faselhd", movieCount, start) : Promise.resolve([]),
+  ]);
+  const merged = [];
+  const maxLen = Math.max(anime.length, movies.length);
+  for (let i = 0; i < maxLen; i++) {
+    if (anime[i]) merged.push(anime[i]);
+    if (movies[i]) merged.push(movies[i]);
+  }
+  return merged.slice(0, limit);
+}
+
+async function faselhdPopular(limit = 36, start = 0) {
+  const animeCount = Math.ceil(limit * 0.7);
+  const movieCount = Math.max(0, limit - animeCount);
+  const [anime, movies] = await Promise.all([
+    novaFetchTmdbList("discover/tv", {
+      with_genres: "16",
+      with_original_language: "ja",
+      sort_by: "vote_count.desc",
+      "vote_count.gte": "200",
+    }, "tv", "faselhd", animeCount, start),
+    movieCount > 0 ? novaFetchTmdbList("discover/movie", {
+      sort_by: "vote_count.desc",
+      "vote_count.gte": "1000",
+    }, "movie", "faselhd", movieCount, start) : Promise.resolve([]),
+  ]);
+  const merged = [];
+  const maxLen = Math.max(anime.length, movies.length);
+  for (let i = 0; i < maxLen; i++) {
+    if (anime[i]) merged.push(anime[i]);
+    if (movies[i]) merged.push(movies[i]);
+  }
+  return merged.slice(0, limit);
+}
+
+async function faselhdSearch(query = "", limit = 24, start = 0) {
+  const q = String(query || "").trim();
+  if (!q) return faselhdLatest(limit, start);
+  const page = Math.floor(Math.max(0, Number(start) || 0) / 20) + 1;
+  const [arRes, enRes] = await Promise.all([
+    novaTmdbGet("search/multi", { query: q, language: "ar-SA", page: String(page), include_adult: "false" }).catch(() => ({ results: [] })),
+    novaTmdbGet("search/multi", { query: q, language: "en-US", page: String(page), include_adult: "false" }).catch(() => ({ results: [] })),
+  ]);
+  const enById = new Map((enRes?.results || []).map(x => [`${x.media_type}:${x.id}`, x]));
+  const raw = (arRes?.results?.length ? arRes.results : (enRes?.results || []))
+    .filter(x => x && x.id && !x.adult && (x.media_type === "movie" || x.media_type === "tv"));
+  return raw.slice(0, limit).map(x => novaCard(x, x.media_type, "faselhd", enById.get(`${x.media_type}:${x.id}`)));
+}
+
+async function faselhdByGenre(genre = "", limit = 30, start = 0) {
+  const norm = normalizeGenreText(genre);
+  const movieG = TMDB_AR_TO_MOVIE_GENRE[norm] || "";
+  const tvG = TMDB_AR_TO_TV_GENRE[norm] || "";
+  const withTvGenres = tvG && tvG !== "16" ? `16,${tvG}` : "16";
+  const animeCount = Math.ceil(limit * 0.7);
+  const movieCount = Math.max(0, limit - animeCount);
+  const [anime, movies] = await Promise.all([
+    novaFetchTmdbList("discover/tv", {
+      with_genres: withTvGenres,
+      with_original_language: "ja",
+      sort_by: "popularity.desc",
+      "vote_count.gte": "20",
+    }, "tv", "faselhd", animeCount, start),
+    movieCount > 0 ? novaFetchTmdbList("discover/movie", {
+      ...(movieG ? { with_genres: movieG } : {}),
+      sort_by: "popularity.desc",
+      "vote_count.gte": "150",
+    }, "movie", "faselhd", movieCount, start) : Promise.resolve([]),
+  ]);
+  const merged = [];
+  const maxLen = Math.max(anime.length, movies.length);
+  for (let i = 0; i < maxLen; i++) {
+    if (anime[i]) merged.push(anime[i]);
+    if (movies[i]) merged.push(movies[i]);
+  }
+  return merged.slice(0, limit);
+}
+
+async function faselhdRandom(genres = []) {
+  const firstGenre = Array.isArray(genres) ? genres[0] : genres;
+  const norm = normalizeGenreText(firstGenre || "");
+  const tvG = TMDB_AR_TO_TV_GENRE[norm] || "";
+  const withGenres = tvG && tvG !== "16" ? `16,${tvG}` : "16";
+  const start = Math.floor(Math.random() * 4) * 20;
+  const list = await novaFetchTmdbList("discover/tv", {
+    with_genres: withGenres,
+    with_original_language: "ja",
+    sort_by: "vote_count.desc",
+    "vote_count.gte": "80",
+  }, "tv", "faselhd", 20, start);
+  if (!list.length) return null;
+  return list[Math.floor(Math.random() * list.length)];
+}
+
+async function novaDetails(rawId, fallbackSource = "animecloud") {
+  const parsed = novaParseId(rawId, fallbackSource);
+  if (!parsed) throw new Error("INVALID_NOVA_ID");
+  const { source, mediaType, tmdbId } = parsed;
+  const [arData, enData] = await Promise.all([
+    novaTmdbGet(`${mediaType}/${tmdbId}`, { language: "ar-SA" }).catch(() => ({})),
+    novaTmdbGet(`${mediaType}/${tmdbId}`, { language: "en-US" }).catch(() => ({})),
+  ]);
+  const base = arData?.id ? arData : enData;
+  return novaCard(base || { id: tmdbId }, mediaType, source, enData);
+}
+
+async function novaSeasons(rawId, fallbackSource = "animecloud") {
+  const parsed = novaParseId(rawId, fallbackSource);
+  if (!parsed) return [];
+  const { source, mediaType, tmdbId } = parsed;
+  const prefix = novaPrefixFor(source);
+  const cardId = `${prefix}-${mediaType}-${tmdbId}`;
+
+  if (mediaType === "movie") {
+    const details = await novaTmdbGet(`movie/${tmdbId}`, { language: "ar-SA" }).catch(() => ({}));
+    const dur = details?.runtime ? `${details.runtime} د` : "";
+    return [{
+      id: `${cardId}-s1`,
+      title: "الفيلم",
+      number: 1,
+      episodes: [{ id: `${cardId}-s1-e1`, title: "مشاهدة الفيلم", duration: dur, number: 1 }],
+    }];
+  }
+
+  const tvMeta = await novaTmdbGet(`tv/${tmdbId}`, { language: "ar-SA" }).catch(() => ({}));
+  const rawSeasons = (Array.isArray(tvMeta?.seasons) ? tvMeta.seasons : []).filter(s => Number(s.season_number) > 0);
+  if (!rawSeasons.length) {
+    return [{
+      id: `${cardId}-s1`,
+      title: "الموسم 1",
+      number: 1,
+      episodes: [{ id: `${cardId}-s1-e1`, title: "الحلقة 1", duration: "", number: 1 }],
+    }];
+  }
+
+  // Fetch detailed Arabic episode lists for up to 15 seasons in a single append_to_response request
+  const appendSeasons = rawSeasons.slice(0, 15).map(s => `season/${s.season_number}`).join(",");
+  const seasonDetails = await novaTmdbGet(`tv/${tmdbId}`, {
+    language: "ar-SA",
+    append_to_response: appendSeasons,
+  }).catch(() => ({}));
+
+  return rawSeasons.map((s) => {
+    const sNum = Number(s.season_number);
+    const detailed = seasonDetails?.[`season/${sNum}`];
+    const detailedEps = Array.isArray(detailed?.episodes) ? detailed.episodes : [];
+    const episodes = detailedEps.length
+      ? detailedEps.map((ep, idx) => {
+          const epNum = Number(ep.episode_number || idx + 1);
+          const epName = String(ep.name || "").trim();
+          const label = epName && !/^Episode\s+\d+$/i.test(epName) ? `الحلقة ${epNum}: ${epName}` : `الحلقة ${epNum}`;
+          return {
+            id: `${cardId}-s${sNum}-e${epNum}`,
+            title: label,
+            duration: ep.runtime ? `${ep.runtime} د` : "",
+            number: epNum,
+          };
+        })
+      : Array.from({ length: Math.max(1, Number(s.episode_count) || 1) }, (_, idx) => {
+          const epNum = idx + 1;
+          return {
+            id: `${cardId}-s${sNum}-e${epNum}`,
+            title: `الحلقة ${epNum}`,
+            duration: "",
+            number: epNum,
+          };
+        });
+
+    return {
+      id: `${cardId}-s${sNum}`,
+      title: String(s.name || `الموسم ${sNum}`),
+      number: sNum,
+      episodes,
+    };
+  });
+}
+
+async function animecloudSources(episodeId, contentId = "") {
+  const parsed = novaParseId(episodeId, "animecloud") || novaParseId(contentId, "animecloud");
+  if (!parsed) return [];
+  const { tmdbId, mediaType, season, episode } = parsed;
+  try {
+    const url = `${NOVA_BACKEND_BASE}/animecloud/streams?tmdbId=${encodeURIComponent(tmdbId)}&mediaType=${encodeURIComponent(mediaType)}&season=${season}&episode=${episode}`;
+    const { data } = await axios.get(url, { timeout: 18000 });
+    const list = Array.isArray(data?.streams) ? data.streams : (Array.isArray(data?.result) ? data.result : []);
+    return list.map((s, idx) => {
+      const rawUrl = String(s?.url || "").trim();
+      if (!rawUrl) return null;
+      const proxyUrl = `/api/video/proxy?url=${encodeURIComponent(rawUrl)}`;
+      const quality = String(s.quality || "1080p");
+      return {
+        id: `animecloud-${tmdbId}-s${season}-e${episode}-${idx + 1}`,
+        title: `أنمي كلاود - ${s.title || s.name || "سيرفر رئيسي"}`,
+        quality,
+        size: novaFormatBytes(s.size),
+        url: proxyUrl,
+        rawUrl,
+        resolvedUrl: proxyUrl,
+        direct: true,
+        downloadable: true,
+        watchable: true,
+        embeddable: true,
+        provider: "AnimeCloud",
+        logoText: "AC",
+        kind: "stream",
+        hint: "تشغيل مباشر فائق السرعة (أنمي كلاود)",
+      };
+    }).filter(Boolean);
+  } catch (err) {
+    console.error("[AnimeCloud Sources Error]", err.message);
+    return [];
+  }
+}
+
+async function isStreamUrlHealthy(rawUrl, extraHeaders = {}) {
+  if (!rawUrl || !/^https?:\/\//i.test(rawUrl)) return false;
+  try {
+    const r = await axios.get(rawUrl, {
+      timeout: 4500,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Accept": "*/*",
+        "Range": "bytes=0-511",
+        "Referer": "https://www.faselhd.cc/",
+        ...extraHeaders,
+      },
+      responseType: "arraybuffer",
+      httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+      validateStatus: () => true,
+    });
+    if (r.status < 200 || r.status >= 400) return false;
+    const ct = String(r.headers["content-type"] || "").toLowerCase();
+    if (ct.includes("application/json")) return false;
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function crossSourceAnimeFallbacks(tmdbId, mediaType, season, episode) {
+  const titleNorm = value => String(value || "").toLowerCase().replace(/[^a-z0-9\u0600-\u06ff]+/g, "");
+  let enTitle = "";
+  let arTitle = "";
+  try {
+    const meta = await novaDetails(`fh-${mediaType}-${tmdbId}`, "faselhd");
+    enTitle = meta?.englishTitle || meta?.title || "";
+    arTitle = meta?.title || "";
+  } catch (_) {}
+
+  const queryTitles = [...new Set([
+    season > 1 && enTitle ? `${enTitle} Season ${season}` : "",
+    enTitle,
+    arTitle,
+  ].filter(Boolean))];
+
+  const tasks = [
+    // 1. AnimeCloud (same TMDB ID + season + episode)
+    animecloudSources(`ac-${mediaType}-${tmdbId}-s${season}-e${episode}`, `ac-${mediaType}-${tmdbId}`).catch(() => []),
+  ];
+
+  if (queryTitles.length) {
+    // 2. Kawaii (AniList GraphQL -> direct MP4 + Arabic VTT subtitles)
+    tasks.push((async () => {
+      for (const qTitle of queryTitles) {
+        try {
+          const hits = await kawaiiSearch(qTitle, 5, [], 1);
+          const wanted = titleNorm(qTitle);
+          const pick = hits.find(h => titleNorm(h.englishTitle || h.title) === wanted) || hits[0];
+          if (pick?.id) {
+            const list = await kawaiiSources(`${pick.id}-ep${episode}`);
+            if (list.length) return list;
+          }
+        } catch (_) {}
+      }
+      return [];
+    })());
+
+    // 3. Anime Witcher (Firestore + MediaFire/PixelDrain/StreamTape)
+    tasks.push((async () => {
+      for (const qTitle of queryTitles) {
+        try {
+          const resolved = await witcherResolveEpisode(qTitle, episode);
+          if (resolved?.anime?.animePath && resolved?.episodeId) {
+            const list = await witcherSources(resolved.anime.animePath, resolved.episodeId);
+            const playable = list.filter(x => x.watchable !== false && x.kind !== "download");
+            if (playable.length) return playable;
+          }
+        } catch (_) {}
+      }
+      return [];
+    })());
+
+    // 4. Animefy (MediaFire / OK.ru / SendVid)
+    tasks.push((async () => {
+      for (const qTitle of queryTitles) {
+        try {
+          const hits = await animeifySearch(qTitle, 5);
+          const wanted = titleNorm(qTitle);
+          const pick = hits.find(h => titleNorm(h.englishTitle || h.title) === wanted) || hits[0];
+          if (pick?.id) {
+            const list = await animeifySources(`${pick.id}-ep${episode}`);
+            const playable = list.filter(x => x.watchable !== false);
+            if (playable.length) return playable;
+          }
+        } catch (_) {}
+      }
+      return [];
+    })());
+  }
+
+  const settled = await Promise.allSettled(tasks);
+  const merged = [];
+  const seenUrls = new Set();
+  for (const res of settled) {
+    if (res.status !== "fulfilled" || !Array.isArray(res.value)) continue;
+    for (const src of res.value) {
+      const key = String(src?.rawUrl || src?.url || "");
+      if (!key || seenUrls.has(key)) continue;
+      seenUrls.add(key);
+      merged.push(src);
+    }
+  }
+  return merged;
+}
+
+async function faselhdSources(episodeId, contentId = "") {
+  const parsed = novaParseId(episodeId, "faselhd") || novaParseId(contentId, "faselhd");
+  if (!parsed) return [];
+  const { tmdbId, mediaType, season, episode } = parsed;
+  const healthyFasel = [];
+  try {
+    const typePath = mediaType === "movie" ? "movie" : "series";
+    const idStr = mediaType === "movie" ? tmdbId : `${tmdbId}:${season}:${episode}`;
+    const url = `${NOVA_BACKEND_BASE}/resolve/${typePath}/${idStr}`;
+    const { data } = await axios.get(url, { timeout: 14000 });
+    const list = Array.isArray(data?.streams) ? data.streams : [];
+    const checked = await Promise.all(list.map(async (s, idx) => {
+      const rawUrl = String(s?.url || "").trim();
+      if (!rawUrl) return null;
+      const ok = await isStreamUrlHealthy(rawUrl, s.headers || {});
+      if (!ok) return null;
+      const proxyUrl = `/api/video/proxy?url=${encodeURIComponent(rawUrl)}`;
+      const quality = String(s.quality || "1080p");
+      return {
+        id: `faselhd-${tmdbId}-s${season}-e${episode}-${idx + 1}`,
+        title: `فاصل HD - ${s.title || quality}`,
+        quality,
+        size: novaFormatBytes(s.size),
+        url: proxyUrl,
+        rawUrl,
+        resolvedUrl: proxyUrl,
+        direct: true,
+        downloadable: !rawUrl.includes(".m3u8"),
+        watchable: true,
+        embeddable: true,
+        provider: "FaselHD",
+        logoText: "FH",
+        kind: "stream",
+        hint: "تشغيل مباشر بترجمة عربية (فاصل HD)",
+      };
+    }));
+    healthyFasel.push(...checked.filter(Boolean));
+  } catch (err) {
+    console.error("[FaselHD Sources Error]", err.message);
+  }
+
+  if (healthyFasel.length > 0) {
+    return healthyFasel;
+  }
+
+  // Fallback to verified working Arabic-subbed anime mirrors so episodes always play smoothly
+  return await crossSourceAnimeFallbacks(tmdbId, mediaType, season, episode);
+}
+
 module.exports = function (options) {
   const port = (typeof options === "number" ? options : (options && options.port)) || process.env.PORT || 3000;
   const app = express();
@@ -1533,7 +2436,21 @@ module.exports = function (options) {
     res.setHeader("Referrer-Policy", "same-origin");
     res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
     const origin = req.headers.origin;
-    if (origin) { try { if (new URL(origin).host !== req.headers.host) return res.status(403).json({ error: "CROSS_ORIGIN_BLOCKED" }); res.setHeader("Access-Control-Allow-Origin", origin); res.setHeader("Vary", "Origin"); } catch (_) { return res.status(403).end(); } }
+    if (origin) {
+      try {
+        const originUrl = new URL(origin);
+        const isCapacitor = origin.startsWith("capacitor://") || origin.startsWith("ionic://") || originUrl.hostname === "localhost";
+        if (originUrl.host !== req.headers.host && !isCapacitor) {
+          return res.status(403).json({ error: "CROSS_ORIGIN_BLOCKED" });
+        }
+        res.setHeader("Access-Control-Allow-Origin", origin);
+        res.setHeader("Access-Control-Allow-Credentials", "true");
+        res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, x-anime-source, Range");
+        res.setHeader("Vary", "Origin");
+      } catch (_) {
+        return res.status(403).end();
+      }
+    }
     if (req.path.startsWith("/api/") || req.path.startsWith("/x/")) {
       res.setHeader("Cache-Control", "no-store");
       if (limited(requestBuckets, clientIp(req), 180, 60_000)) return res.status(429).json({ error: "TOO_MANY_REQUESTS" });
@@ -1548,7 +2465,7 @@ module.exports = function (options) {
   // Public-facing aliases: upstream provider names and internal route names do
   // not need to be exposed to the browser. The rewrite stays server-side.
   app.use((req, _res, next) => {
-    const aliases = [["/x/gateway", "/api/trpc"], ["/x/content", "/api/anime"], ["/x/w", "/api/witcher"], ["/x/kawaii", "/api/kawaii"], ["/x/animeify", "/api/animeify"], ["/x/episode", "/api/episode"], ["/x/auth", "/api/auth"]];
+    const aliases = [["/x/gateway", "/api/trpc"], ["/x/content", "/api/anime"], ["/x/w", "/api/witcher"], ["/x/kawaii", "/api/kawaii"], ["/x/animeify", "/api/animeify"], ["/x/animecloud", "/api/animecloud"], ["/x/faselhd", "/api/faselhd"], ["/x/episode", "/api/episode"], ["/x/auth", "/api/auth"]];
     for (const [from, to] of aliases) {
       if (req.url === from || req.url.startsWith(`${from}/`) || req.url.startsWith(`${from}?`)) { req.url = to + req.url.slice(from.length); break; }
     }
@@ -1592,9 +2509,6 @@ module.exports = function (options) {
   app.get("/api/auth/me", (req, res) => res.json({ user: sessionUser(req) }));
 
   async function getClusterLatest(start = 0, limit = 24) {
-    // GetGenre18Content is a compact mobile-feed endpoint and currently
-    // returns only five cards regardless of limit. Keep the old-sized rail
-    // by using the same search endpoint on AnimeFox with genre 18.
     const raw = await clusterApiPost("Content/searchContent", {
       search_keyword: "",
       media_type: "",
@@ -1609,13 +2523,195 @@ module.exports = function (options) {
     return list.map(normalizeCard);
   }
 
+  async function getClusterPopular(start = 0, limit = 24) {
+    const raw = await clusterApiPost("Content/searchContent", {
+      search_keyword: "",
+      media_type: "",
+      start: String(start),
+      limit: String(limit),
+      order_by: "ratings",
+      order_direction: "DESC",
+      language_id: "0",
+      genre_id: "0"
+    });
+    const list = apiList(raw);
+    return list.map(normalizeCard);
+  }
+
+  const CLUSTER_GENRE_IDS = Object.fromEntries(
+    Object.entries({
+      "إيتشي": "56", "إيسيكاي": "32", "حريم": "41", "آلات / ميكا": "58", "آلات": "58", "ميكا": "58",
+      "ألعاب مميتة": "50", "موسيقى": "53", "فنون قتال": "54", "مصاصي دماء": "59",
+      "جريمة": "52", "سحر": "28", "شياطين": "49", "قوى خارقة": "51",
+      "رعب": "45", "نفسي": "46", "رياضة": "35", "تاريخي": "48",
+      "شوجو": "37", "سينين": "57", "مدرسي": "24", "غموض": "25",
+      "إثارة": "47", "خيال علمي": "36", "خارق للطبيعة": "44", "شريحة من الحياة": "55",
+      "رومانسي": "33", "رومنسي": "33", "كوميديا": "26", "كوميدي": "26", "شونين": "38", "خيال": "34",
+      "مغامرات": "31", "مغامرة": "31", "أكشن": "29", "دراما": "30"
+    }).map(([k, v]) => [normalizeGenreText(k), v])
+  );
+
+  async function getClusterByGenre(genre, start = 0, limit = 30) {
+    const norm = normalizeGenreText(genre);
+    const genreId = CLUSTER_GENRE_IDS[norm] || (/^\d+$/.test(String(genre).trim()) ? String(genre).trim() : "0");
+    const raw = await clusterApiPost("Content/searchContent", {
+      search_keyword: genreId === "0" ? String(genre || "") : "",
+      content_type: "0",
+      start: String(start),
+      limit: String(limit),
+      order_by: "created_at",
+      order_direction: "DESC",
+      language_id: "0",
+      genre_id: genreId,
+    });
+    const list = apiList(raw);
+    return list.map(normalizeCard);
+  }
+
+  async function witcherByGenre(genre, page = 0, limit = 30) {
+    await witcherRefreshKeys();
+    const norm = normalizeGenreText(genre);
+    const aliases = [...new Set([genre, ...witcherGenreAliases(genre), ANIMEIFY_GENRE_MAP[norm]].filter(Boolean))];
+    const filterExpr = aliases.map(t => `tags:"${String(t).replace(/"/g, '\\"')}"`).join(" OR ");
+    try {
+      const params = new URLSearchParams({
+        attributesToRetrieve: JSON.stringify(["objectID","name","poster_uri","type","details","tags","story","english_title","poster","rating","path","doc_ref","updated_at","airing_date","created_at","status","episodes_count","seasons_count"]),
+        filters: `(${filterExpr})`,
+        hitsPerPage: String(Math.min(50, Math.max(1, Number(limit) || 30))),
+        page: String(Math.max(0, Number(page) || 0)),
+        query: "",
+      });
+      const json = await witcherAlgolia("series", params.toString());
+      const hits = (Array.isArray(json.hits) ? json.hits : []).filter(h => h && h.name);
+      if (hits.length) {
+        return hits.map(hit => {
+          const card = witcherCard(hit);
+          card.episodes = String(hit.episodes_count || card.episodes || "");
+          card.totalSeasons = String(hit.seasons_count || "");
+          return card;
+        });
+      }
+    } catch (_) {}
+    // Fallback to text search across series index
+    for (const term of aliases.slice(0, 3)) {
+      try {
+        const res = await witcherSearch(term, page, limit);
+        if (res.length) return res;
+      } catch (_) {}
+    }
+    return [];
+  }
+
+  async function handleByGenreBySource(source, input = {}) {
+    const genre = String(input.genre || "").trim();
+    const limit = Math.min(80, Math.max(1, Number(input.limit) || 30));
+    const start = Math.max(0, Number(input.start) || 0);
+    if (!genre) return [];
+    if (source === "animecloud") return await animecloudByGenre(genre, limit, start);
+    if (source === "faselhd") return await faselhdByGenre(genre, limit, start);
+    if (source === "animeify") return await animeifyByGenre(genre, limit);
+    if (source === "kawaii") return await kawaiiSearch("", limit, [genre], Math.floor(start / limit) + 1);
+    if (source === "witcher") return await witcherByGenre(genre, Math.floor(start / limit), limit);
+    return await getClusterByGenre(genre, start, limit);
+  }
+
+  function resolveTrpcSource(req) {
+    return String(req.query.source || req.headers["x-anime-source"] || "").toLowerCase();
+  }
+
+  async function handleLatestBySource(source, input = {}) {
+    const limit = Math.min(80, Math.max(1, Number(input.limit) || 24));
+    const start = Math.max(0, Number(input.start) || 0);
+    const isPopular = String(input.genreId || "") === "1";
+    if (source === "animecloud") {
+      return isPopular ? await animecloudPopular(limit, start) : await animecloudLatest(limit, start);
+    }
+    if (source === "faselhd") {
+      return isPopular ? await faselhdPopular(limit, start) : await faselhdLatest(limit, start);
+    }
+    if (source === "animeify") {
+      return isPopular ? await animeifyPopular(limit) : await animeifyLatest(limit);
+    }
+    if (source === "kawaii") {
+      return isPopular
+        ? await kawaiiSearch("", limit, [], 1, ["POPULARITY_DESC"])
+        : await kawaiiSearch("", limit, [], 1);
+    }
+    if (source === "witcher") {
+      return isPopular ? await witcherPopular(limit) : await witcherLatest(limit);
+    }
+    return isPopular ? await getClusterPopular(start, limit) : await getClusterLatest(start, limit);
+  }
+
+  async function handleEpisodeSourcesBySource(source, input = {}) {
+    const epId = String(input.episodeId || "");
+    const cid = String(input.contentId || "");
+    if (source === "animecloud" || epId.startsWith("ac-") || cid.startsWith("ac-")) {
+      return await animecloudSources(epId, cid);
+    }
+    if (source === "faselhd" || epId.startsWith("fh-") || cid.startsWith("fh-")) {
+      return await faselhdSources(epId, cid);
+    }
+    if (source === "animeify" || epId.startsWith("animeify-") || /-[a-zA-Z0-9]+-ep\d+/.test(epId)) {
+      return await animeifySources(epId);
+    }
+    if (source === "kawaii" || /^\d+-ep\d+$/.test(epId)) {
+      return await kawaiiSources(epId);
+    }
+    if (source === "witcher") {
+      if (cid) {
+        try {
+          const item = await witcherLoad(cid);
+          if (item?.animePath) return await witcherSources(item.animePath, epId);
+        } catch (_) {}
+      }
+      return [];
+    }
+    const raw = await clusterApiPost("Content/getSourceByEpisodeID", {
+      episode_id: epId,
+    });
+    const formatted = apiList(raw).map((src, sourceIndex) => {
+      const url = String(src.source || src.source_url || src.url || "");
+      const provider = /playmogo/i.test(url) ? "PlayMogo" :
+        /mediafire/i.test(url) ? "MediaFire" :
+        /mega\.(nz|io)/i.test(url) ? "Mega" :
+        /drive\.google/i.test(url) ? "Google Drive" :
+        /mp4upload/i.test(url) ? "MP4Upload" :
+        /uqload/i.test(url) ? "UQLoad" :
+        /streamtape/i.test(url) ? "StreamTape" :
+        /pixeldrain/i.test(url) ? "PixelDrain" :
+        /streamwish|streamfiles/i.test(url) ? "StreamFiles" :
+        /voe\.sx/i.test(url) ? "Voe" :
+        /doodstream|dsvplay/i.test(url) ? "DoodStream" :
+        /dailymotion/i.test(url) ? "DailyMotion" :
+        /youtu/i.test(url) ? "YouTube" : "AnimeCluster";
+      const downloadable = src.downloadable === true || src.downloadable === 1 || src.downloadable === "1";
+      const isNative = /\.(mp4|webm|m3u8)(\?|$)/i.test(url);
+      const isStreamProvider = ["MP4Upload","UQLoad","Voe","DoodStream","StreamTape","StreamFiles"].includes(provider);
+      const isDownloadProvider = ["MediaFire","Mega","Google Drive"].includes(provider);
+      const logoMap = { "MediaFire":"MF","Mega":"MEGA","Google Drive":"DRIVE","MP4Upload":"MP4","UQLoad":"UQ","StreamTape":"ST","PixelDrain":"PD","StreamFiles":"SF","Voe":"VOE","DoodStream":"DOOD","DailyMotion":"DM","YouTube":"YT","PlayMogo":"PM" };
+      return {
+        id: String(src.source_id || src.id || sourceIndex + 1),
+        title: String(src.source_title || src.title || `مصدر ${sourceIndex + 1}`),
+        quality: String(src.source_quality || src.quality || ""),
+        size: String(src.source_size || src.size || ""),
+        url,
+        downloadable: downloadable || isDownloadProvider,
+        watchable: isNative || isStreamProvider || provider === "PixelDrain" || provider === "DailyMotion" || provider === "YouTube",
+        embeddable: isNative || isStreamProvider || provider === "PixelDrain" || provider === "DailyMotion" || provider === "YouTube",
+        provider,
+        logoText: logoMap[provider] || "CL",
+        kind: isDownloadProvider ? "download" : "stream",
+      };
+    }).filter(src => src.url);
+    return await resolveSourceList(formatted);
+  }
+
   // ─── 1. تلبية tRPC للواجهة الحالية ───
   app.use("/api/trpc", async (req, res) => {
     const p = req.path.replace(/^\//, "");
+    const source = resolveTrpcSource(req);
     try {
-      // tRPC يرسل الطلبات الأولية مجمعة مثل:
-      // anime.latest,anime.random,anime.genres?batch=1&input={"0":...,"1":...}
-      // يجب إعادة مصفوفة نتائج بنفس ترتيب العمليات، وليس نتيجة عملية واحدة.
       if (p.includes(",")) {
         const procedures = p.split(",");
         let batchInput = {};
@@ -1631,18 +2727,21 @@ module.exports = function (options) {
           } else if (procedure === "auth.logout") {
             value = { success: true };
           } else if (procedure === "anime.latest") {
-            const source = String(req.query.source || "").toLowerCase();
-            value = source === "animeify" ? await animeifyLatest(input.limit || 24) : source === "kawaii" ? await kawaiiSearch("", input.limit || 24, [], 1) : source === "witcher" ? await witcherLatest(input.limit || 24) : await getClusterLatest(input.start || 0, input.limit || 24);
+            value = await handleLatestBySource(source, input);
           } else if (procedure === "anime.random") {
-            const source = String(req.query.source || "").toLowerCase();
             const genres = input.genres || input.genre || input.genreId || [];
-            value = source === "animeify" ? ((await animeifyLatest(24)) || [])[0] || null : source === "witcher" ? await witcherRandom(genres, input.exclude || []) : source === "kawaii" ? ((await kawaiiRecommend(genres, 1, input.exclude || [])) || [])[0] || null : await getClusterRandom(genres);
+            value = source === "animecloud" ? await animecloudRandom(genres) : source === "faselhd" ? await faselhdRandom(genres) : source === "animeify" ? ((await animeifyLatest(24)) || [])[0] || null : source === "witcher" ? await witcherRandom(genres, input.exclude || []) : source === "kawaii" ? ((await kawaiiRecommend(genres, 1, input.exclude || [])) || [])[0] || null : await getClusterRandom(genres);
           } else if (procedure === "anime.genres") {
             value = DEFAULT_GENRES;
+          } else if (procedure === "anime.byGenre") {
+            value = await handleByGenreBySource(source, input);
           } else if (procedure === "anime.details") {
-            const source = String(req.query.source || "").toLowerCase();
             const id = String(input.id || "");
-            if (source === "animeify" || id.startsWith("x")) {
+            if (source === "animecloud" || id.startsWith("ac-")) {
+              value = await novaDetails(id, "animecloud");
+            } else if (source === "faselhd" || id.startsWith("fh-")) {
+              value = await novaDetails(id, "faselhd");
+            } else if (source === "animeify" || id.startsWith("x")) {
               value = await animeifyDetails(id);
             } else if (source === "kawaii") {
               value = await kawaiiDetails(id);
@@ -1658,9 +2757,12 @@ module.exports = function (options) {
               value = normalizeCard(item || {});
             }
           } else if (procedure === "anime.seasons") {
-            const source = String(req.query.source || "").toLowerCase();
             const id = String(input.id || "");
-            if (source === "animeify" || id.startsWith("x")) {
+            if (source === "animecloud" || id.startsWith("ac-")) {
+              value = await novaSeasons(id, "animecloud");
+            } else if (source === "faselhd" || id.startsWith("fh-")) {
+              value = await novaSeasons(id, "faselhd");
+            } else if (source === "animeify" || id.startsWith("x")) {
               value = await animeifySeasons(id);
             } else if (source === "kawaii") {
               value = await kawaiiSeasons(id);
@@ -1684,53 +2786,35 @@ module.exports = function (options) {
                 })),
               }));
             }
-          } else if (procedure === "anime.episodeSources") {
-            const source = String(req.query.source || "").toLowerCase();
-            const epId = String(input.episodeId || "");
-            if (source === "animeify" || epId.startsWith("animeify-") || /-[a-zA-Z0-9]+-ep\d+/.test(epId)) {
-              value = await animeifySources(epId);
-            } else if (source === "kawaii" || /^\d+-ep\d+$/.test(epId)) {
-              value = await kawaiiSources(epId);
+          } else if (procedure === "anime.search") {
+            const kw = input.keyword || "";
+            const start = Math.max(0, Number(input.start) || 0);
+            const limit = Math.min(50, Math.max(1, Number(input.limit) || 24));
+            if (source === "animecloud") {
+              value = await animecloudSearch(kw, limit, start);
+            } else if (source === "faselhd") {
+              value = await faselhdSearch(kw, limit, start);
+            } else if (source === "animeify") {
+              value = await animeifySearch(kw, limit);
+            } else if (source === "kawaii") {
+              value = await kawaiiSearch(kw, limit, [], Math.floor(start / limit) + 1);
+            } else if (source === "witcher") {
+              value = await witcherSearch(kw, Math.floor(start / limit), limit);
             } else {
-              const raw = await clusterApiPost("Content/getSourceByEpisodeID", {
-                episode_id: epId,
+              const raw = await clusterApiPost("Content/searchContent", {
+                search_keyword: kw,
+                content_type: "0",
+                start: String(start),
+                limit: String(limit),
+                order_by: "created_at",
+                order_direction: "DESC",
+                language_id: "0",
+                genre_id: "0"
               });
-              const formatted = apiList(raw).map((source, sourceIndex) => {
-                const url = String(source.source || source.source_url || source.url || "");
-                const provider = /playmogo/i.test(url) ? "PlayMogo" :
-                  /mediafire/i.test(url) ? "MediaFire" :
-                  /mega\.(nz|io)/i.test(url) ? "Mega" :
-                  /drive\.google/i.test(url) ? "Google Drive" :
-                  /mp4upload/i.test(url) ? "MP4Upload" :
-                  /uqload/i.test(url) ? "UQLoad" :
-                  /streamtape/i.test(url) ? "StreamTape" :
-                  /pixeldrain/i.test(url) ? "PixelDrain" :
-                  /streamwish|streamfiles/i.test(url) ? "StreamFiles" :
-                  /voe\.sx/i.test(url) ? "Voe" :
-                  /doodstream|dsvplay/i.test(url) ? "DoodStream" :
-                  /dailymotion/i.test(url) ? "DailyMotion" :
-                  /youtu/i.test(url) ? "YouTube" : "AnimeCluster";
-                const downloadable = source.downloadable === true || source.downloadable === 1 || source.downloadable === "1";
-                const isNative = /\.(mp4|webm|m3u8)(\?|$)/i.test(url);
-                const isStreamProvider = ["MP4Upload","UQLoad","Voe","DoodStream","StreamTape","StreamFiles"].includes(provider);
-                const isDownloadProvider = ["MediaFire","Mega","Google Drive"].includes(provider);
-                const logoMap = { "MediaFire":"MF","Mega":"MEGA","Google Drive":"DRIVE","MP4Upload":"MP4","UQLoad":"UQ","StreamTape":"ST","PixelDrain":"PD","StreamFiles":"SF","Voe":"VOE","DoodStream":"DOOD","DailyMotion":"DM","YouTube":"YT","PlayMogo":"PM" };
-                return {
-                  id: String(source.source_id || source.id || sourceIndex + 1),
-                  title: String(source.source_title || source.title || `مصدر ${sourceIndex + 1}`),
-                  quality: String(source.source_quality || source.quality || ""),
-                  size: String(source.source_size || source.size || ""),
-                  url,
-                  downloadable: downloadable || isDownloadProvider,
-                  watchable: isNative || isStreamProvider || provider === "PixelDrain" || provider === "DailyMotion" || provider === "YouTube",
-                  embeddable: isNative || isStreamProvider || provider === "PixelDrain" || provider === "DailyMotion" || provider === "YouTube",
-                  provider,
-                  logoText: logoMap[provider] || "CL",
-                  kind: isDownloadProvider ? "download" : "stream",
-                };
-              }).filter(source => source.url);
-              value = await resolveSourceList(formatted);
+              value = apiList(raw).map(normalizeCard);
             }
+          } else if (procedure === "anime.episodeSources") {
+            value = await handleEpisodeSourcesBySource(source, input);
           } else if (procedure.startsWith("account.")) {
             value = accountProcedure(procedure, input, req);
           }
@@ -1743,17 +2827,22 @@ module.exports = function (options) {
         return res.json({ result: { data: { json: DEFAULT_GENRES } } });
       }
 
+      if (p.includes("anime.byGenre")) {
+        const input = parseTrpcInput(req);
+        const items = await handleByGenreBySource(source, input);
+        return res.json({ result: { data: { json: items } } });
+      }
+
       if (p.includes("anime.latest")) {
-        const source = String(req.query.source || "").toLowerCase();
-        const items = source === "animeify" ? await animeifyLatest(24) : source === "kawaii" ? await kawaiiSearch("", 24, [], 1) : source === "witcher" ? await witcherLatest(24) : await getClusterLatest(0, 24);
+        const input = parseTrpcInput(req);
+        const items = await handleLatestBySource(source, input);
         return res.json({ result: { data: { json: items } } });
       }
 
       if (p.includes("anime.random")) {
         const input = parseTrpcInput(req);
-        const source = String(req.query.source || "").toLowerCase();
         const genres = input.genres || input.genre || input.genreId || [];
-        const result = source === "animeify" ? ((await animeifyLatest(24)) || [])[0] || null : source === "witcher" ? await witcherRandom(genres, input.exclude || []) : source === "kawaii" ? await kawaiiRecommend(genres, 1, input.exclude || []) : await getClusterRandom(genres);
+        const result = source === "animecloud" ? await animecloudRandom(genres) : source === "faselhd" ? await faselhdRandom(genres) : source === "animeify" ? ((await animeifyLatest(24)) || [])[0] || null : source === "witcher" ? await witcherRandom(genres, input.exclude || []) : source === "kawaii" ? await kawaiiRecommend(genres, 1, input.exclude || []) : await getClusterRandom(genres);
         return res.json({ result: { data: { json: Array.isArray(result) ? (result[0] || null) : result } } });
       }
 
@@ -1782,7 +2871,14 @@ module.exports = function (options) {
         const kw = input.keyword || "";
         const start = Math.max(0, Number(input.start) || 0);
         const limit = Math.min(50, Math.max(1, Number(input.limit) || 24));
-        const source = String(req.query.source || "").toLowerCase();
+        if (source === "animecloud") {
+          const items = await animecloudSearch(kw, limit, start);
+          return res.json({ result: { data: { json: items } } });
+        }
+        if (source === "faselhd") {
+          const items = await faselhdSearch(kw, limit, start);
+          return res.json({ result: { data: { json: items } } });
+        }
         if (source === "animeify") {
           const items = await animeifySearch(kw, limit);
           return res.json({ result: { data: { json: items } } });
@@ -1811,7 +2907,12 @@ module.exports = function (options) {
 
       if (p.includes("anime.details")) {
         const id = String(parseTrpcInput(req).id || "");
-        const source = String(req.query.source || "").toLowerCase();
+        if (source === "animecloud" || id.startsWith("ac-")) {
+          return res.json({ result: { data: { json: await novaDetails(id, "animecloud") } } });
+        }
+        if (source === "faselhd" || id.startsWith("fh-")) {
+          return res.json({ result: { data: { json: await novaDetails(id, "faselhd") } } });
+        }
         if (source === "animeify" || id.startsWith("x")) {
           return res.json({ result: { data: { json: await animeifyDetails(id) } } });
         }
@@ -1832,7 +2933,12 @@ module.exports = function (options) {
 
       if (p.includes("anime.seasons")) {
         const id = String(parseTrpcInput(req).id || "");
-        const source = String(req.query.source || "").toLowerCase();
+        if (source === "animecloud" || id.startsWith("ac-")) {
+          return res.json({ result: { data: { json: await novaSeasons(id, "animecloud") } } });
+        }
+        if (source === "faselhd" || id.startsWith("fh-")) {
+          return res.json({ result: { data: { json: await novaSeasons(id, "faselhd") } } });
+        }
         if (source === "animeify" || id.startsWith("x")) {
           return res.json({ result: { data: { json: await animeifySeasons(id) } } });
         }
@@ -1863,42 +2969,8 @@ module.exports = function (options) {
       }
 
       if (p.includes("anime.episodeSources")) {
-        const epId = String(parseTrpcInput(req).episodeId || "");
-        const source = String(req.query.source || "").toLowerCase();
-        if (source === "animeify" || epId.startsWith("animeify-") || /-[a-zA-Z0-9]+-ep\d+/.test(epId)) {
-          return res.json({ result: { data: { json: await animeifySources(epId) } } });
-        }
-        if (source === "kawaii" || /^\d+-ep\d+$/.test(epId)) {
-          return res.json({ result: { data: { json: await kawaiiSources(epId) } } });
-        }
-        const raw = await clusterApiPost("Content/getSourceByEpisodeID", {
-          episode_id: epId
-        });
-        const sources = apiList(raw);
-        const formatted = sources.map((s, idx) => {
-          const url = s.source || "";
-          const isMf = url.includes("mediafire");
-          const isPd = /pixeldrain/i.test(url);
-          const isSf = /streamfiles|streamwish/i.test(url);
-          const isSt = /streamtape/i.test(url);
-          const isNative = /\.(mp4|webm|m3u8)(\?|$)/i.test(url) || isMf;
-          let provider = isMf ? "MediaFire" : isPd ? "PixelDrain" : isSf ? "StreamFiles" : isSt ? "StreamTape" : "AnimeCluster";
-          const logoMap = { "MediaFire":"MF","PixelDrain":"PD","StreamFiles":"SF","StreamTape":"ST","AnimeCluster":"CL" };
-          return {
-            id: String(s.source_id || idx + 1),
-            title: String(s.source_title || (isMf ? "MediaFire" : "سيرفر مشاهدة")),
-            quality: String(s.source_quality || "1080p"),
-            size: String(s.source_size || ""),
-            url,
-            downloadable: s.downloadable === "1" || s.downloadable === 1 || isMf,
-            watchable: isNative || (!isMf && !url.includes("mega.nz")) || isPd || isSf || isSt,
-            embeddable: isNative || (!isMf && !url.includes("mega.nz")) || isPd || isSf || isSt,
-            provider,
-            logoText: logoMap[provider] || "CL",
-            kind: isMf ? "download" : "stream"
-          };
-        });
-        const resolved = await resolveSourceList(formatted);
+        const input = parseTrpcInput(req);
+        const resolved = await handleEpisodeSourcesBySource(source, input);
         return res.json({ result: { data: { json: resolved } } });
       }
 
@@ -2074,19 +3146,24 @@ module.exports = function (options) {
       }
       const range = req.headers.range;
       let referer = new URL(url).origin + "/";
+      let userAgent = MF_UA;
       if (/mp4upload\.com/i.test(url)) {
         referer = "https://www.mp4upload.com/";
       } else if (/kawaii-anime\.com|video\.kawaii-anime\.com/i.test(url)) {
         referer = "https://kawaiianime.cc/";
+      } else if (/faselhd/i.test(url) || /\/stream\?url=/i.test(url)) {
+        referer = "https://www.faselhd.cc/";
+        userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
       }
 
+      const isM3u8 = /\.m3u8(?:$|[?&%])/i.test(url) || decodeURIComponent(url).includes(".m3u8");
       const upstream = await axios.get(url, {
-        responseType: "stream",
+        responseType: isM3u8 ? "text" : "stream",
         timeout: 30000,
         headers: {
-          "User-Agent": MF_UA,
+          "User-Agent": userAgent,
           "Accept": "*/*",
-          ...(range ? { Range: range } : {}),
+          ...(range && !isM3u8 ? { Range: range } : {}),
           "Referer": referer,
         },
         httpsAgent: new https.Agent({ rejectUnauthorized: false }),
@@ -2095,8 +3172,28 @@ module.exports = function (options) {
 
       res.status(upstream.status);
       let ct = upstream.headers["content-type"];
+      if (isM3u8 || (ct && /mpegurl/i.test(ct))) {
+        const bodyText = typeof upstream.data === "string" ? upstream.data : String(upstream.data || "");
+        const baseObj = new URL(url);
+        const rewritten = bodyText.split(/\r?\n/).map((line) => {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed.startsWith("#")) {
+            return line.replace(/URI="([^"]+)"/g, (_m, uri) => {
+              const abs = new URL(uri, baseObj).toString();
+              return `URI="/api/video/proxy?url=${encodeURIComponent(abs)}"`;
+            });
+          }
+          const abs = new URL(trimmed, baseObj).toString();
+          return `/api/video/proxy?url=${encodeURIComponent(abs)}`;
+        }).join("\n");
+        res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
+        res.setHeader("Access-Control-Allow-Origin", "*");
+        res.setHeader("Cache-Control", "no-store");
+        return res.send(rewritten);
+      }
+
       if (!ct || ct === "application/octet-stream" || ct === "binary/octet-stream" || ct.includes("text/plain")) {
-        if (/\.mp4(\?|$)/i.test(url)) ct = "video/mp4";
+        if (/\.mp4(\?|$)/i.test(url) || /\/animecloud\/mp4/i.test(url)) ct = "video/mp4";
         else if (/\.webm(\?|$)/i.test(url)) ct = "video/webm";
         else if (/\.m3u8(\?|$)/i.test(url)) ct = "application/vnd.apple.mpegurl";
         else if (/\.mkv(\?|$)/i.test(url)) ct = "video/mp4";
@@ -2166,6 +3263,22 @@ module.exports = function (options) {
   app.get("/api/animeify/episode/:id/sources", async (req, res) => { try { res.json(await animeifySources(req.params.id)); } catch (e) { res.status(502).json({ error: e.message }); } });
   app.get("/api/animeify/:id", async (req, res) => { try { res.json(await animeifyDetails(req.params.id)); } catch (e) { res.status(502).json({ error: e.message }); } });
 
+  // AnimeCloud endpoints (Nova source, unified Anime Sky format)
+  app.get("/api/animecloud/latest", async (req, res) => { try { res.json(await animecloudLatest(Number(req.query.limit) || 24, Number(req.query.start) || 0)); } catch (e) { res.status(502).json({ error: e.message }); } });
+  app.get("/api/animecloud/search", async (req, res) => { try { res.json(await animecloudSearch(req.query.q || req.query.query || "", Number(req.query.limit) || 24, Number(req.query.start) || 0)); } catch (e) { res.status(502).json({ error: e.message }); } });
+  app.get("/api/animecloud/random", async (req, res) => { try { const raw = req.query.genres || req.query.genre || ""; const genres = Array.isArray(raw) ? raw : String(raw).split(",").filter(Boolean); res.json(await animecloudRandom(genres)); } catch (e) { res.status(502).json({ error: e.message }); } });
+  app.get("/api/animecloud/:id/seasons", async (req, res) => { try { res.json(await novaSeasons(req.params.id, "animecloud")); } catch (e) { res.status(502).json({ error: e.message }); } });
+  app.get("/api/animecloud/episode/:id/sources", async (req, res) => { try { res.json(await animecloudSources(req.params.id)); } catch (e) { res.status(502).json({ error: e.message }); } });
+  app.get("/api/animecloud/:id", async (req, res) => { try { res.json(await novaDetails(req.params.id, "animecloud")); } catch (e) { res.status(502).json({ error: e.message }); } });
+
+  // FaselHD endpoints (Nova source, unified Anime Sky format)
+  app.get("/api/faselhd/latest", async (req, res) => { try { res.json(await faselhdLatest(Number(req.query.limit) || 24, Number(req.query.start) || 0)); } catch (e) { res.status(502).json({ error: e.message }); } });
+  app.get("/api/faselhd/search", async (req, res) => { try { res.json(await faselhdSearch(req.query.q || req.query.query || "", Number(req.query.limit) || 24, Number(req.query.start) || 0)); } catch (e) { res.status(502).json({ error: e.message }); } });
+  app.get("/api/faselhd/random", async (req, res) => { try { const raw = req.query.genres || req.query.genre || ""; const genres = Array.isArray(raw) ? raw : String(raw).split(",").filter(Boolean); res.json(await faselhdRandom(genres)); } catch (e) { res.status(502).json({ error: e.message }); } });
+  app.get("/api/faselhd/:id/seasons", async (req, res) => { try { res.json(await novaSeasons(req.params.id, "faselhd")); } catch (e) { res.status(502).json({ error: e.message }); } });
+  app.get("/api/faselhd/episode/:id/sources", async (req, res) => { try { res.json(await faselhdSources(req.params.id)); } catch (e) { res.status(502).json({ error: e.message }); } });
+  app.get("/api/faselhd/:id", async (req, res) => { try { res.json(await novaDetails(req.params.id, "faselhd")); } catch (e) { res.status(502).json({ error: e.message }); } });
+
   // ملفات dist الثابتة (تفضيل مجلد dist/public المبني حديثاً بواسطة Vite)
   const staticPath = fs.existsSync(path.join(__dirname, "dist", "public", "index.html"))
     ? path.join(__dirname, "dist", "public")
@@ -2175,594 +3288,9 @@ module.exports = function (options) {
   app.get("*", (req, res) => {
     const indexPath = path.join(staticPath, "index.html");
     if (fs.existsSync(indexPath)) {
-      const localAuthBridge = `<script>(function(){
-        function openAuth(){
-          if(document.getElementById('local-auth-box'))return;
-          var box=document.createElement('div');box.id='local-auth-box';box.dir='rtl';
-          box.style='position:fixed;inset:0;z-index:99999;background:rgba(3,5,12,.92);display:flex;align-items:center;justify-content:center;font-family:Arial,sans-serif;color:#fff';
-          box.innerHTML='<form id="local-auth-form" style="width:min(360px,90vw);padding:28px;background:#101421;border:1px solid #21e6ff;display:flex;flex-direction:column;gap:12px"><h2 id="local-auth-title" style="margin:0">تسجيل الدخول</h2><input id="local-auth-user" required minlength="3" maxlength="32" placeholder="اسم المستخدم" style="height:42px;padding:0 10px;background:#080b12;color:white;border:1px solid #536078"><input id="local-auth-pass" required minlength="6" type="password" placeholder="كلمة المرور" style="height:42px;padding:0 10px;background:#080b12;color:white;border:1px solid #536078"><div id="local-auth-error" style="color:#ff9ddc;font-size:13px"></div><button style="height:42px;background:#ff2abf;color:white;border:0;font-weight:bold">متابعة</button><button type="button" id="local-auth-switch" style="height:36px;background:transparent;color:#21e6ff;border:0">ليس لديك حساب؟ إنشاء حساب</button><button type="button" id="local-auth-close" style="height:30px;background:transparent;color:#aaa;border:0">إلغاء</button></form>';
-          document.body.appendChild(box);var mode='login';
-          box.querySelector('#local-auth-switch').onclick=function(){mode=mode==='login'?'register':'login';box.querySelector('#local-auth-title').textContent=mode==='login'?'تسجيل الدخول':'إنشاء حساب';this.textContent=mode==='login'?'ليس لديك حساب؟ إنشاء حساب':'لديك حساب؟ تسجيل الدخول'};
-          box.querySelector('#local-auth-close').onclick=function(){box.remove()};
-          box.querySelector('form').onsubmit=async function(e){e.preventDefault();var err=box.querySelector('#local-auth-error');err.textContent='جاري التنفيذ...';var r=await fetch('/api/auth/'+mode,{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({username:box.querySelector('#local-auth-user').value,password:box.querySelector('#local-auth-pass').value})});var d=await r.json().catch(function(){return{}});if(!r.ok){err.textContent=d.error||'تعذر تنفيذ العملية';return}location.reload()};
-        }
-        document.addEventListener('click',function(e){var b=e.target.closest&&e.target.closest('button');if(b&&/تسجيل الدخول/.test(b.textContent)){e.preventDefault();e.stopImmediatePropagation();openAuth()}},true);
-        function mountLogout(){if(document.getElementById('neon-logout'))return;var text=(document.body&&document.body.textContent)||'';var accountPage=/account|profile|user|حساب/.test(location.pathname+' '+text)&&(/المفضلة|سجل المشاهدة|تسجيل الخروج/.test(text));if(!accountPage)return;fetch('/api/auth/me',{credentials:'include'}).then(function(r){return r.json()}).then(function(d){if(!d||!d.user)return;var b=document.createElement('button');b.id='neon-logout';b.textContent='تسجيل الخروج';b.dir='rtl';b.style='display:block;width:min(420px,90%);margin:28px auto 8px;background:#101827;color:#ff91d7;border:1px solid #ff2abf;border-radius:4px;padding:10px 12px;font:13px Arial;cursor:pointer';b.onclick=function(){fetch('/api/auth/logout',{method:'POST',credentials:'include'}).then(function(){location.reload()})};(document.querySelector('main')||document.body).appendChild(b)}).catch(function(){})}mountLogout();setTimeout(mountLogout,1200);setTimeout(mountLogout,3000);
-      })();</script><script>(function(){
-        if(location.pathname.indexOf('/watch/')!==0)return;
-        var activeVideo=null, activeKey='', timer=0;
-        function key(video){return 'neonflix:watch-progress:'+location.pathname.split('/').pop()+':'+(video.currentSrc||video.src||'native');}
-        function attach(video){
-          if(activeVideo===video)return;
-          activeVideo=video; activeKey=key(video);
-          var saved=null; try{saved=JSON.parse(localStorage.getItem(activeKey)||'null')}catch(e){}
-          var restore=function(){if(saved&&saved.time>3&&video.duration&&saved.time<video.duration-5){try{video.currentTime=saved.time}catch(e){}}};
-          video.addEventListener('loadedmetadata',restore,{once:true});
-          if(video.readyState>=1)restore();
-          var save=function(){if(!activeKey||!isFinite(video.currentTime)||video.currentTime<1)return;try{localStorage.setItem(activeKey,JSON.stringify({time:video.currentTime,duration:video.duration||0,savedAt:Date.now()}))}catch(e){}};
-          video.addEventListener('timeupdate',function(){clearTimeout(timer);timer=setTimeout(save,800)});
-          video.addEventListener('pause',save); video.addEventListener('seeking',save);
-          video.addEventListener('ended',function(){try{localStorage.removeItem(activeKey)}catch(e){}});
-          window.addEventListener('pagehide',save); window.addEventListener('beforeunload',save);
-        }
-        function scan(){var v=document.querySelector('video');if(v)attach(v); document.querySelectorAll('iframe').forEach(function(frame){frame.setAttribute('allowfullscreen','true');frame.setAttribute('webkitallowfullscreen','true');frame.setAttribute('mozallowfullscreen','true');frame.setAttribute('allow','autoplay; fullscreen; picture-in-picture; encrypted-media')})}
-        new MutationObserver(scan).observe(document.documentElement,{childList:true,subtree:true});
-        setInterval(scan,1000); scan();
-      })();</script>`;
       const html = fs.readFileSync(indexPath, "utf8");
-      const aliasBridge = `<script>(function(){var f=window.fetch;window.fetch=function(r,o){var u=String(r&&r.url||r||'');var p=[['/api/anime','/x/content'],['/api/witcher','/x/w'],['/api/kawaii','/x/kawaii'],['/api/animeify','/x/animeify'],['/api/episode','/x/episode'],['/api/auth','/x/auth']];p.forEach(function(x){if(u.indexOf(x[0])===0)u=x[1]+u.slice(x[0].length)});var sm=localStorage.getItem('neonflix-source')||'cluster';if(u.indexOf('/api/trpc/anime.')===0){u+=(u.indexOf('?')>=0?'&':'?')+'source='+encodeURIComponent(sm)}if(u!==String(r&&r.url||r||''))r=u;return f.call(this,r,o)};})();</script>`;
-      const sourceBridge = `<script>(function(){
-        var clean=function(){
-          var o1=document.getElementById('persistent-source-switcher');if(o1)o1.remove();
-          var o2=document.getElementById('source-switcher');if(o2)o2.remove();
-        };
-        clean();
-        var key='neonflix-source',mode=localStorage.getItem(key)||'cluster';
-        var bar=document.createElement('div');
-        bar.id='source-switcher';
-        bar.dir='rtl';
-        bar.style='position:fixed;top:max(46px,env(safe-area-inset-top,46px));left:6px;right:6px;z-index:99990;display:flex;gap:4px;padding:4px;background:rgba(8,12,24,0.95);border:1px solid rgba(0,229,255,0.4);border-radius:10px;backdrop-filter:blur(10px);box-shadow:0 4px 18px rgba(0,0,0,0.75);box-sizing:border-box';
-        [['cluster','Anime Cluster'],['witcher','Anime Witcher'],['kawaii','Anime Kawaii'],['animeify','Animefy']].forEach(function(x){
-          var b=document.createElement('button');
-          b.textContent=x[1];
-          var active=mode===x[0];
-          b.style='flex:1 1 0;min-width:0;padding:6px 2px;border:1px solid '+(active?'#ff2abf':'rgba(255,255,255,0.12)')+';background:'+(active?'#ff2abf':'rgba(255,255,255,0.06)')+';color:#fff;font:700 11px system-ui,-apple-system,Arial;border-radius:7px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:center';
-          b.onclick=function(){localStorage.setItem(key,x[0]);location.reload()};
-          bar.appendChild(b);
-        });
-        document.body.appendChild(bar);
-      })();</script>`;
-      const witcherEnhance = `<script>(function(){
-        if(localStorage.getItem('neonflix-source')!=='witcher')return;
-        var qs=new URLSearchParams(location.search), cid=qs.get('contentId')||'';
-        function episodeId(){return location.pathname.split('/').pop()||''}
-        function markCurrent(){if(location.pathname.indexOf('/watch/')===0&&cid){try{localStorage.setItem('neonflix:watched:'+cid+':'+episodeId(),'1')}catch(e){}}}
-        function badges(){document.querySelectorAll('a[href^="/watch/"]').forEach(function(a){var m=a.href.match(/\/watch\/([^?]+)/);if(!m)return;var key='neonflix:watched:'+location.pathname.split('/').pop()+':'+decodeURIComponent(m[1]);if(localStorage.getItem(key)&&!a.querySelector('.witcher-watched')){var b=document.createElement('span');b.className='witcher-watched';b.textContent='✓ تمت المشاهدة';b.style='display:block;color:#57f5a6;font-size:10px;margin-top:3px';a.appendChild(b)}})}
-        function player(){if(location.pathname.indexOf('/watch/')!==0)return;var box=document.querySelector('.player-frame');if(!box||box.querySelector('.witcher-native-player'))return;var q=new URLSearchParams(location.search),anime=q.get('anime')||'',title=q.get('title')||'',n=(title.match(/(\\d+)/)||[])[1]||'';fetch('/api/witcher/resolve?title='+encodeURIComponent(anime)+'&number='+encodeURIComponent(n)+'&id='+encodeURIComponent(cid)).then(function(r){return r.ok?r.json():null}).then(function(x){if(!x)return null;return fetch('/api/witcher/'+encodeURIComponent(x.animeId)+'/episode/'+encodeURIComponent(x.episodeId)+'/sources').then(function(r){return r.json()}).then(function(list){return {x:x,list:list}})}).then(function(data){if(!data)return;var s=(data.list||[]).find(function(x){return x.direct&&x.url});if(!s)return;var v=document.createElement('video');v.className='video-player witcher-native-player';v.controls=true;v.playsInline=true;v.setAttribute('webkit-playsinline','true');v.src='/api/video/proxy?url='+encodeURIComponent(s.url);v.style='display:block;width:100%;aspect-ratio:16/9;background:#000';var old=box.querySelector('iframe,.player-placeholder');if(old)old.replaceWith(v);else box.appendChild(v);var k='neonflix:witcher-progress:'+data.x.animeId+':'+data.x.episodeId;try{var p=JSON.parse(localStorage.getItem(k)||'null');v.addEventListener('loadedmetadata',function(){if(p&&p.time>3&&p.time<v.duration-5)v.currentTime=p.time});v.addEventListener('timeupdate',function(){if(v.currentTime>1)localStorage.setItem(k,JSON.stringify({time:v.currentTime}))});v.addEventListener('ended',function(){localStorage.removeItem(k)})}catch(e){}}).catch(function(){});}
-        markCurrent();badges();player();new MutationObserver(function(){badges();player()}).observe(document.documentElement,{childList:true,subtree:true});
-      })();</script>`;
-
-      // ───────────────────────────────────────────────────────────────────
-      // Witcher Home Enhance — adds:
-      //   • A "Recently Added Episodes" rail in the home page above the
-      //     curated feed (only when the user is in witcher mode).
-      //   • A "Recently Suggested" history strip beside the random panel.
-      //   • Passes the user's "shown suggestions" list as `exclude=` so
-      //     /api/witcher/recommend never repeats the same anime twice.
-      //   • Persists each picked suggestion into localStorage.
-      // ───────────────────────────────────────────────────────────────────
-      const kawaiiEnhance = `<script>(function(){
-        if(localStorage.getItem('neonflix-source')!=='kawaii')return;
-        var busy=false;
-        function addTracks(video,list){
-          var tracks=list||[], parent=video.parentElement, overlay=document.createElement('div'), settings=document.createElement('div');
-          parent.style.position='relative'; overlay.className='neon-kawaii-caption'; overlay.style='position:absolute;left:4%;right:4%;bottom:9%;z-index:4;text-align:center;color:#fff;font-size:26px;font-weight:700;line-height:1.35;text-shadow:0 2px 4px #000,0 0 7px #000;pointer-events:none;direction:auto'; parent.appendChild(overlay);
-          settings.dir='rtl'; settings.style='display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:7px;padding:7px 9px;background:rgba(7,10,18,.92);border:1px solid rgba(33,230,255,.3);color:#dce8f5;font:11px Arial';
-          var label=document.createElement('span');label.textContent='الترجمة:';settings.appendChild(label);
-          var langSelect=document.createElement('select');langSelect.title='اختيار لغة الترجمة';langSelect.style='background:#101827;color:#fff;border:1px solid #536078;padding:4px';
-          var off=document.createElement('option');off.value='off';off.textContent='إيقاف';langSelect.appendChild(off);
-          tracks.forEach(function(sub,i){var t=document.createElement('track'),lang=String(sub.lang||'').toLowerCase(),arabic=/(^|[^a-z])(ar|ara|arabic|العربية|عربي)([^a-z]|$)/i.test(lang);t.kind='subtitles';t.srclang=arabic?'ar':'en';t.label=arabic?'العربية':'English';t.default=false;t.src='/api/video/proxy?url='+encodeURIComponent(sub.url);video.appendChild(t);var opt=document.createElement('option');opt.value=String(i);opt.textContent=arabic?'العربية':'English';langSelect.appendChild(opt)});
-          var sizeSelect=document.createElement('select');sizeSelect.title='حجم الخط';sizeSelect.style='background:#101827;color:#fff;border:1px solid #536078;padding:4px';[['18px','صغير'],['26px','متوسط'],['34px','كبير'],['44px','كبير جدًا']].forEach(function(x){var o=document.createElement('option');o.value=x[0];o.textContent='حجم '+x[1];if(x[0]==='26px')o.selected=true;sizeSelect.appendChild(o)});
-          var colorSelect=document.createElement('select');colorSelect.title='لون الترجمة';colorSelect.style='background:#101827;color:#fff;border:1px solid #536078;padding:4px';[['#fff','أبيض'],['#ffe45c','أصفر'],['#69e7ff','سماوي'],['#ff91d7','وردي']].forEach(function(x){var o=document.createElement('option');o.value=x[0];o.textContent='لون '+x[1];colorSelect.appendChild(o)});
-          var posSelect=document.createElement('input');posSelect.type='range';posSelect.min='5';posSelect.max='85';posSelect.value='9';posSelect.title='حرّك الترجمة عموديًا';posSelect.setAttribute('aria-label','موضع الترجمة');posSelect.style='width:110px;accent-color:#21e6ff';var posLabel=document.createElement('span');posLabel.textContent='موضع 9%';
-          settings.appendChild(langSelect);settings.appendChild(sizeSelect);settings.appendChild(colorSelect);settings.appendChild(posLabel);settings.appendChild(posSelect);parent.appendChild(settings);
-          var current=tracks.length?'0':'off';
-          function render(){var idx=parseInt(current,10),track=video.textTracks&&video.textTracks[idx],cues=track&&track.activeCues;overlay.textContent='';if(current!=='off'&&cues&&cues.length){for(var i=0;i<cues.length;i++){var line=document.createElement('div');line.textContent=String(cues[i].text||'').replace(/<[^>]+>/g,'');overlay.appendChild(line)}}}
-          function choose(value){current=value;for(var i=0;i<(video.textTracks||[]).length;i++)video.textTracks[i].mode='hidden';if(current!=='off'&&video.textTracks[Number(current)])video.textTracks[Number(current)].mode='hidden';render()}
-          langSelect.value=current;langSelect.onchange=function(){choose(this.value)};sizeSelect.onchange=function(){overlay.style.fontSize=this.value};colorSelect.onchange=function(){overlay.style.color=this.value};posSelect.oninput=function(){overlay.style.bottom=this.value+'%';posLabel.textContent='موضع '+this.value+'%'};
-          Array.prototype.forEach.call(video.textTracks||[],function(t){t.mode='hidden';t.addEventListener('cuechange',render)});video.addEventListener('timeupdate',render);video.addEventListener('loadedmetadata',render);choose(current);
-        }
-        function mount(){
-          if(busy||location.pathname.indexOf('/watch/')!==0)return;
-          var box=document.querySelector('.player-frame');if(!box||box.querySelector('[data-neon-kawaii-player]'))return;
-          busy=true;var ep=decodeURIComponent(location.pathname.split('/').pop()||'');
-          fetch('/x/kawaii/episode/'+encodeURIComponent(ep)+'/sources').then(function(r){return r.ok?r.json():[]}).then(function(list){
-            var source=(list||[]).find(function(x){return x.provider==='Kawaii Direct'&&x.url});if(!source){busy=false;return;}
-            var v=document.createElement('video');v.setAttribute('data-neon-kawaii-player','1');v.className='video-player';v.controls=true;v.playsInline=true;v.setAttribute('webkit-playsinline','true');v.preload='metadata';v.src='/api/video/proxy?url='+encodeURIComponent(source.url);v.style='display:block;width:100%;aspect-ratio:16/9;background:#000';addTracks(v,source.subtitles);
-            var old=box.querySelector('iframe,.player-placeholder,video');if(old)old.replaceWith(v);else box.appendChild(v);busy=false;
-          }).catch(function(){busy=false});
-        }
-        mount();new MutationObserver(mount).observe(document.documentElement,{childList:true,subtree:true});setInterval(mount,1200);
-      })();</script>`;
-      const witcherHomeEnhance = `<script>(function(){
-        if (localStorage.getItem('neonflix-source') !== 'witcher') return;
-        var SHOWN_KEY = 'neonflix:shown-suggestions';
-        var getShown = function(){ try { return JSON.parse(localStorage.getItem(SHOWN_KEY) || '[]'); } catch(e){ return []; } };
-        var setShown = function(arr){ try { localStorage.setItem(SHOWN_KEY, JSON.stringify(arr.slice(-30))); } catch(e){} } ;
-        var rememberShown = function(id){ if (!id) return; var arr = getShown(); if (arr.indexOf(String(id)) < 0) arr.push(String(id)); setShown(arr); };
-
-        function injectCSS(){
-          if (document.getElementById('we-style')) return;
-          var css = ''
-            + '.we-rail{margin:32px auto 0;max-width:1180px;padding:0 20px}'
-            + '.we-rail-inner{border:1px solid rgba(0,229,255,.22);background:linear-gradient(180deg,rgba(0,229,255,.05),transparent);padding:18px}'
-            + '.we-rail-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;direction:rtl}'
-            + '.we-rail-head h2{margin:0;font-size:18px;color:#f1f4fb}'
-            + '.we-rail-head small{color:#78839a;font-size:11px}'
-            + '.we-rail-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:10px}'
-            + '.we-ep-card{display:flex;gap:10px;padding:8px;border:1px solid rgba(255,255,255,.07);background:rgba(5,8,15,.6);text-decoration:none;color:inherit;direction:rtl;transition:border-color .2s,background .2s}'
-            + '.we-ep-card:hover{border-color:rgba(255,42,191,.55);background:rgba(255,42,191,.06)}'
-            + '.we-ep-thumb{flex:0 0 64px;aspect-ratio:3/4;background:#0b0e17 center/cover no-repeat;border:1px solid rgba(0,229,255,.18)}'
-            + '.we-ep-info{flex:1;min-width:0}'
-            + '.we-ep-info b{display:block;font-size:12px;color:#f1f4fb;margin-bottom:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}'
-            + '.we-ep-info span{display:block;font-size:10px;color:#73f7ff}'
-            + '.we-ep-info em{display:block;font-size:10px;color:#57f5a6;margin-top:2px;font-style:normal}'
-            + '.we-history{margin-top:14px;padding:10px 14px;border:1px dashed rgba(255,42,191,.35);background:rgba(255,42,191,.05);direction:rtl;font-size:11px;color:#ffe1f4}'
-            + '.we-history b{color:#fff}'
-            + '.we-history button{float:left;background:transparent;border:1px solid rgba(255,42,191,.45);color:#ff7ad6;padding:3px 9px;font-size:10px;cursor:pointer}'
-            + '.we-spin{display:inline-block;width:14px;height:14px;border:2px solid rgba(0,229,255,.3);border-top-color:#21e6ff;border-radius:50%;animation:we-spin 0.9s linear infinite;vertical-align:middle}'
-            + '@keyframes we-spin{to{transform:rotate(360deg)}}';
-          var s = document.createElement('style');
-          s.id = 'we-style';
-          s.textContent = css;
-          document.head.appendChild(s);
-        }
-
-        function buildRail(items){
-          var grid = document.createElement('div');
-          grid.className = 'we-rail-grid';
-          items.forEach(function(it){
-            var a = document.createElement('a');
-            a.className = 'we-ep-card';
-            var url = '/watch/' + encodeURIComponent(it.episodeId) +
-              '?title=' + encodeURIComponent(it.episodeTitle || ('الحلقة ' + it.episodeNumber)) +
-              '&anime=' + encodeURIComponent(it.animeTitle) +
-              '&contentId=' + encodeURIComponent(it.animeId);
-            a.href = url;
-            var thumb = it.episodeImage || it.animePoster;
-            var style = thumb ? 'background-image:url(' + String(thumb).replace(/"/g,'%22') + ')' : '';
-            a.innerHTML = ''
-              + '<div class="we-ep-thumb" style="' + style + '"></div>'
-              + '<div class="we-ep-info">'
-              +   '<b>' + (it.animeTitle || '—') + '</b>'
-              +   '<span>الحلقة ' + (it.episodeNumber || '?') + ' · ' + (it.animeYear || '—') + '</span>'
-              +   '<em>إجمالي ' + (it.totalEpisodes || '?') + ' حلقة</em>'
-              + '</div>';
-            grid.appendChild(a);
-          });
-          return grid;
-        }
-
-        function loadRecentEpisodes(){
-          var wrap = document.getElementById('we-rail-wrap');
-          if (!wrap) return;
-          wrap.innerHTML = '<div class="we-rail-inner" style="text-align:center;color:#73f7ff"><span class="we-spin"></span> جاري جلب آخر الحلقات...</div>';
-          fetch('/api/witcher/recent-episodes?limit=12').then(function(r){return r.ok?r.json():null}).then(function(list){
-            if (!wrap) return;
-            wrap.innerHTML = '';
-            if (!Array.isArray(list) || !list.length){
-              wrap.innerHTML = '<div class="we-rail-inner" style="text-align:center;color:#78839a;font-size:12px">لا توجد حلقات متاحة الآن في أنمي ويتشر.</div>';
-              return;
-            }
-            var inner = document.createElement('div');
-            inner.className = 'we-rail-inner';
-            var head = document.createElement('div');
-            head.className = 'we-rail-head';
-            head.innerHTML = '<div><small style="color:#73f7ff;font-size:10px;letter-spacing:.08em">WITCHER · LIVE FEED</small><h2>آخر الحلقات المضافة</h2></div><button id="we-refresh" style="background:transparent;border:1px solid rgba(0,229,255,.45);color:#21e6ff;padding:6px 12px;font-size:10px;cursor:pointer">↻ تحديث</button>';
-            inner.appendChild(head);
-            inner.appendChild(buildRail(list));
-            wrap.appendChild(inner);
-            var btn = document.getElementById('we-refresh');
-            if (btn) btn.onclick = function(){ loadRecentEpisodes(); };
-          }).catch(function(){
-            if (!wrap) return;
-            wrap.innerHTML = '<div class="we-rail-inner" style="text-align:center;color:#ff8aa3;font-size:12px">تعذر جلب الحلقات. حاول مرة أخرى.</div>';
-          });
-        }
-
-        function tryInjectRail(){
-          if (location.pathname !== '/' && location.pathname !== '') return;
-          if (document.getElementById('we-rail-wrap')) return;
-          var anchor = document.querySelector('#explore');
-          if (!anchor) return;
-          injectCSS();
-          var wrap = document.createElement('section');
-          wrap.id = 'we-rail-wrap';
-          wrap.className = 'we-rail';
-          wrap.dir = 'rtl';
-          anchor.parentNode.insertBefore(wrap, anchor);
-          loadRecentEpisodes();
-        }
-
-        function tryInjectHistory(){
-          var randomSection = document.getElementById('random');
-          if (!randomSection || document.getElementById('we-history')) return;
-          var shown = getShown();
-          if (!shown.length) return;
-          var box = document.createElement('div');
-          box.id = 'we-history';
-          box.className = 'we-history';
-          box.innerHTML = '<b>سجل الاقتراحات:</b> ' + shown.length + ' أنمي شاهدته <button id="we-clear">مسح السجل</button>';
-          randomSection.appendChild(box);
-          var clr = document.getElementById('we-clear');
-          if (clr) clr.onclick = function(){ setShown([]); box.remove(); };
-        }
-
-        function watchSuggested(){
-          if (location.pathname !== '/' && location.pathname !== '') return;
-          var observer = new MutationObserver(function(){
-            var cards = document.querySelectorAll('.suggested-card-container a[href^="/anime/"]');
-            cards.forEach(function(a){
-              var m = (a.getAttribute('href') || '').match(/\/anime\/([^/?]+)/);
-              if (m) rememberShown(decodeURIComponent(m[1]));
-            });
-            tryInjectRail();
-            tryInjectHistory();
-          });
-          observer.observe(document.body, { childList: true, subtree: true });
-          setTimeout(tryInjectRail, 250);
-          setTimeout(tryInjectHistory, 500);
-        }
-
-        if (document.readyState === 'loading') {
-          document.addEventListener('DOMContentLoaded', watchSuggested);
-        } else {
-          watchSuggested();
-        }
-      })();</script>`;
-
-            const episodeNavigation = `<script>(function(){
-        if(location.pathname.indexOf('/watch/')!==0)return;
-        var tries=0, attached=false;
-        function go(ep, anime, cid){ if(!ep)return; var u='/watch/'+encodeURIComponent(ep.id)+'?title='+encodeURIComponent(ep.title||('الحلقة '+ep.number))+'&anime='+encodeURIComponent(anime||'')+'&contentId='+encodeURIComponent(cid||''); location.assign(u); }
-        function boot(){
-          var q=new URLSearchParams(location.search),anime=q.get('anime')||'',title=q.get('title')||'',cid=q.get('contentId')||'',eid=decodeURIComponent(location.pathname.split('/').pop()||''),mode=localStorage.getItem('neonflix-source')||'cluster';
-          var num=((title.match(/[0-9]+/)||[])[0]||'');
-          var endpoint=mode==='witcher'?'/api/witcher/resolve?title='+encodeURIComponent(anime)+'&number='+encodeURIComponent(num)+'&id='+encodeURIComponent(cid):'/api/anime/resolve?title='+encodeURIComponent(anime)+'&id='+encodeURIComponent(cid);
-          fetch(endpoint).then(function(r){return r.ok?r.json():null}).then(function(x){
-            if(!x)return null;
-            var sid=mode==='witcher'?(x.animeId||x.id||anime):(x.id||cid),current=mode==='witcher'?(x.episodeId||eid):eid;
-            return fetch((mode==='witcher'?'/api/witcher/':'/api/anime/')+encodeURIComponent(sid)+'/seasons').then(function(r){return r.ok?r.json():[]}).then(function(seasons){return {seasons:Array.isArray(seasons)?seasons:[],sid:sid,current:String(current)}});
-          }).then(function(data){
-            if(!data)return;
-            var eps=[];(data.seasons||[]).forEach(function(season){(season.episodes||[]).forEach(function(ep){eps.push(ep)})});
-            var i=eps.findIndex(function(ep){return String(ep.id)===data.current}); if(i<0)i=eps.findIndex(function(ep){return num&&String(ep.number)===num});
-            var frame=document.querySelector('.player-frame');
-            if(!frame||i<0){if(tries++<40)setTimeout(boot,300);return;}
-            var old=document.querySelector('.episode-navigation');if(old)old.remove();
-            var box=document.createElement('div');box.className='episode-navigation';box.dir='rtl';box.style='display:flex;gap:10px;margin:12px 0;padding:10px;border:1px solid rgba(0,229,255,.25);background:rgba(5,8,15,.85)';
-            function add(label,ep){var b=document.createElement('button');b.type='button';b.textContent=label;b.disabled=!ep;b.style='flex:1;padding:11px;border:1px solid '+(ep?'#21e6ff':'#435064')+';background:transparent;color:'+(ep?'#fff':'#687386')+';cursor:'+(ep?'pointer':'not-allowed');if(ep)b.onclick=function(){go(ep,anime,data.sid)};box.appendChild(b)}
-            add('‹ الحلقة السابقة',eps[i-1]);add('الحلقة التالية ›',eps[i+1]);frame.parentNode.insertBefore(box,frame.nextSibling);attached=true;
-          }).catch(function(){if(tries++<40)setTimeout(boot,300)});
-        }
-        function wireSelector(){
-          var selects=document.querySelectorAll('.watch-selectors select'); if(!selects.length)return;
-          var select=selects[selects.length-1]; if(select.dataset.neonEpisodeNav==='1')return; select.dataset.neonEpisodeNav='1';
-          select.addEventListener('change',function(){var option=select.options[select.selectedIndex];var q=new URLSearchParams(location.search);go({id:select.value,title:option&&option.textContent||('الحلقة '+select.value),number:select.value},q.get('anime')||'',q.get('contentId')||'')});
-        }
-        boot();wireSelector();new MutationObserver(function(){wireSelector();if(!document.querySelector('.episode-navigation')&&!attached){tries=0;boot()}}).observe(document.documentElement,{childList:true,subtree:true});
-      })();</script>`;
-      const historyNavigation = `<script>(function(){
-function input(){var q=new URLSearchParams(location.search),anime=q.get('anime')||'',title=q.get('title')||'الحلقة',cid=q.get('contentId')||'',eid=decodeURIComponent(location.pathname.split('/').pop()||'');return {contentId:cid,animeTitle:anime,episodeId:eid,episodeTitle:title}}
-function save(){if(location.pathname.indexOf('/watch/')!==0)return;var p=input();if(!p.animeTitle||!p.episodeId)return;var body=encodeURIComponent(JSON.stringify({json:p}));fetch('/api/trpc/account.saveHistory?input='+body,{credentials:'include'}).catch(function(){})}
-function links(){document.addEventListener('click',function(e){var a=e.target.closest&&e.target.closest('a.history-row');if(!a)return;var href=a.getAttribute('href')||'';if(href.indexOf('/watch/')<0)return;e.preventDefault();var anime=a.getAttribute('data-anime')||a.dataset.anime||'';if(!anime){var t=a.textContent||'';anime=t.trim()}var u=href;if(anime)u+=(u.indexOf('?')>=0?'&':'?')+'anime='+encodeURIComponent(anime);location.assign(u)},true)}
-if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',function(){save();links()});else{save();links()}
-})();</script>`;
-      const sourceFallback = `<script>(function(){
-        if(location.pathname.indexOf('/watch/')!==0)return;var q=new URLSearchParams(location.search),cid=q.get('contentId')||'',anime=q.get('anime')||'',title=q.get('title')||'',mode=localStorage.getItem('neonflix-source')||'cluster',target=mode==='witcher'?'kawaii':mode==='kawaii'?'witcher':'witcher',num=(title.match(/(\d+)/)||[])[1]||'',eid=decodeURIComponent(location.pathname.split('/').pop()||'');
-        function notice(text,button){var old=document.querySelector('.source-fallback-notice');if(old)return;var n=document.createElement('div');n.className='source-fallback-notice';n.dir='rtl';n.style='position:fixed;inset:0;z-index:99998;background:rgba(3,5,12,.88);display:flex;align-items:center;justify-content:center;color:#fff;font:16px Arial;text-align:center';n.innerHTML='<div style="max-width:420px;padding:25px;border:1px solid #21e6ff;background:#101421"><div>'+text+'</div>'+(button?'<button style="margin-top:15px;padding:9px 18px;background:#ff2abf;color:white;border:0;cursor:pointer">العودة للمصدر الآخر</button>':'')+'</div>';document.body.appendChild(n);if(button)n.querySelector('button').onclick=function(){localStorage.setItem('neonflix-source',target);location.reload()}}
-        function currentSources(){if(mode==='kawaii'){return fetch('/api/kawaii/episode/'+encodeURIComponent(eid)+'/sources').then(function(r){return r.ok?r.json():[]}).catch(function(){return []})}if(mode!=='witcher'){var u='/api/episode/'+encodeURIComponent(eid)+'/sources';return fetch(u).then(function(r){return r.ok?r.json():[]}).catch(function(){return []})}var n=(title.match(/(\d+)/)||[])[1]||'';return fetch('/api/witcher/resolve?title='+encodeURIComponent(anime)+'&number='+encodeURIComponent(n)+'&id='+encodeURIComponent(cid)).then(function(r){return r.ok?r.json():null}).then(function(x){if(!x)return [];return fetch('/api/witcher/'+encodeURIComponent(x.animeId)+'/episode/'+encodeURIComponent(x.episodeId)+'/sources').then(function(r){return r.ok?r.json():[]})}).catch(function(){return []})}function findOther(){var search=target==='witcher'?'/api/witcher/search?q=':target==='kawaii'?'/api/kawaii/search?q=':'/api/anime/search?q=';return fetch(search+encodeURIComponent(anime)).then(function(r){return r.json()}).then(function(items){var list=Array.isArray(items)?items:[];var norm=function(v){return String(v||'').toLowerCase().replace(/[^a-z0-9\u0600-\u06ff]+/g,' ').replace(/\s+/g,' ').trim()};var wanted=norm(anime);var item=list.slice().sort(function(a,b){var an=norm(a.title||a.content_title||a.name),bn=norm(b.title||b.content_title||b.name),as=an===wanted?100:(an.indexOf(wanted)>=0||wanted.indexOf(an)>=0?60:0),bs=bn===wanted?100:(bn.indexOf(wanted)>=0||wanted.indexOf(bn)>=0?60:0);return bs-as})[0];if(!item)return null;var sid=item.id;var seasons=target==='witcher'?'/api/witcher/'+encodeURIComponent(sid)+'/seasons':target==='kawaii'?'/api/kawaii/'+encodeURIComponent(sid)+'/seasons':'/api/anime/'+encodeURIComponent(sid)+'/seasons';return fetch(seasons).then(function(r){return r.json()}).then(function(ss){var eps=[];(ss||[]).forEach(function(s){eps=eps.concat(s.episodes||[])});var ep=eps.find(function(e){return num&&String(e.number)===String(num)})||eps[0];return ep?{id:sid,episode:ep}:null})})}
-        currentSources().then(function(list){if(Array.isArray(list)&&list.some(function(s){return s.watchable!==false&&s.url}))return;var guard='neonflix-fallback:'+mode+':'+cid+':'+location.pathname.split('/').pop();if(sessionStorage.getItem(guard)){notice('لم يتم العثور على الحلقة في أي من المصدرين.',true);return}sessionStorage.setItem(guard,'1');notice('لم يتم العثور على الحلقة في '+(mode==='witcher'?'Anime Witcher':mode==='kawaii'?'Anime Kawaii':'Anime Cluster')+'، جاري البحث في المصدر الآخر...');return findOther().then(function(found){if(!found){notice('لم يتم العثور على الحلقة في أي من المصدرين.',true);return}localStorage.setItem('neonflix-source',target);var u='/watch/'+encodeURIComponent(found.episode.id)+'?title='+encodeURIComponent(found.episode.title||title)+'&anime='+encodeURIComponent(anime)+'&contentId='+encodeURIComponent(found.id);location.replace(u)}).catch(function(){notice('تعذر العثور على الحلقة في المصدر الآخر.',true)})});
-      })();</script>`;
-      const legacyContext = `<script>(function(){if(location.pathname.indexOf('/watch/')!==0)return;var q=new URLSearchParams(location.search);if(q.get('contentId')||!q.get('anime'))return;var mode=localStorage.getItem('neonflix-source')||'cluster',u=mode==='witcher'?'/x/w/search?q=':'/x/content/search?q=';fetch(u+encodeURIComponent(q.get('anime'))).then(function(r){return r.json()}).then(function(a){var x=(a||[])[0];if(!x||!x.id)return;q.set('contentId',x.id);history.replaceState(null,'',location.pathname+'?'+q.toString());location.reload()}).catch(function(){})})();</script>`;
-
-      // ───────────────────────────────────────────────────────────────────
-      // Custom-link bridge — adds an always-visible input bar above the
-      // player that lets the user paste ANY video URL and play it on the
-      // in-site player. Calls /api/video/direct to resolve MF / PD / SF /
-      // ST / m3u8 / mp4. Works without rebuilding the React bundle.
-      // ───────────────────────────────────────────────────────────────────
-      // ───────────────────────────────────────────────────────────────────
-      // Poster fit fix — the suggestion card poster was being letterboxed
-      // because the default CSS uses `object-fit: contain` against a
-      // box that's wider than the typical 3:4 poster. Override with a
-      // proper aspect ratio + cover so the image fills cleanly without
-      // distortion.
-      // ───────────────────────────────────────────────────────────────────
-      const posterFixBridge = `<script>(function(){
-        if (document.getElementById('pf-style')) return;
-        var css = ''
-          + '.suggested-card-container .anime-card-poster{height:auto!important;aspect-ratio:3/4!important;background:#05060a!important}'
-          + '.suggested-card-container .anime-card-poster img{width:100%!important;height:100%!important;object-fit:cover!important;background:#05060a!important}'
-          + '.suggested-card-container .anime-card-poster .poster-scanline{position:absolute!important;inset:0!important;pointer-events:none!important}'
-          + '.random-panel .anime-card{width:100%!important;max-width:240px!important}';
-        var s = document.createElement('style');
-        s.id = 'pf-style';
-        s.textContent = css;
-        document.head.appendChild(s);
-      })();</script>`;
-
-      const favoriteRepairBridge = `<script>(function(){
-        if(location.pathname.indexOf('/anime/')!==0)return;
-        function input(){var id=decodeURIComponent(location.pathname.split('/anime/')[1]||'');var h=document.querySelector('h1');var img=document.querySelector('.details-poster img');return {contentId:id,title:h&&h.textContent.trim()||id,poster:img&&img.src||null};}
-        function wire(){document.querySelectorAll('button').forEach(function(btn){if(!/المفضلة/.test(btn.textContent||'')||btn.dataset.neonFavorite==='1')return;btn.dataset.neonFavorite='1';btn.addEventListener('click',function(e){e.preventDefault();e.stopImmediatePropagation();var remove=/في المفضلة|إزالة|حذف/.test(btn.textContent||'');var data=input();var proc=remove?'account.removeFavorite':'account.addFavorite';var payload=remove?{contentId:data.contentId}:data;fetch('/api/trpc/'+proc,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({json:payload})}).then(function(r){if(!r.ok)throw new Error(r.status===401?'يجب تسجيل الدخول أولاً':'تعذر حفظ المفضلة');return r.json()}).then(function(){btn.textContent=remove?'حفظ في المفضلة':'في المفضلة';btn.dataset.neonFavorite='1'}).catch(function(err){btn.title=err.message;btn.textContent=err.message})},true)});}
-        wire();new MutationObserver(wire).observe(document.documentElement,{childList:true,subtree:true});
-      })();</script>`;
-      const watchReliabilityBridge = `<script>(function(){
-        if (location.pathname.indexOf('/watch/') !== 0) return;
-        var progressKey = 'neonflix:watch-progress:' + location.pathname + ':' + (new URLSearchParams(location.search).get('contentId') || 'unknown');
-        function save(v){ if(!v || !isFinite(v.currentTime) || v.currentTime < 1) return; try{ localStorage.setItem(progressKey, JSON.stringify({time:v.currentTime,duration:isFinite(v.duration)?v.duration:0,savedAt:Date.now()})); }catch(e){} }
-        function restore(v){ if(!v) return; try{ var x=JSON.parse(localStorage.getItem(progressKey)||'null'); if(x && isFinite(x.time) && x.time>=3 && (!isFinite(v.duration)||!v.duration||x.time<v.duration-5)){ var set=function(){try{v.currentTime=x.time;}catch(e){}}; if(v.readyState>=1)set(); else v.addEventListener('loadedmetadata',set,{once:true}); } }catch(e){} }
-        function tryNextServer(){
-          var rows = Array.from(document.querySelectorAll('.watch-sources-section .source-row'));
-          var activeIdx = rows.findIndex(function(r){ return r.classList.contains('source-active'); });
-          if (activeIdx >= 0 && activeIdx < rows.length - 1) {
-            var nextBtn = rows[activeIdx + 1].querySelector('button.source-select');
-            if (nextBtn) { nextBtn.click(); return true; }
-          }
-          return false;
-        }
-        function wire(){
-          document.querySelectorAll('.player-frame video').forEach(function(v){
-            if(v.dataset.neonProgress==='1') return;
-            v.dataset.neonProgress='1';
-            v.addEventListener('loadedmetadata',function(){restore(v)});
-            v.addEventListener('timeupdate',function(){save(v)});
-            v.addEventListener('pause',function(){save(v)});
-            v.addEventListener('seeking',function(){save(v)});
-            v.addEventListener('error',function(){ setTimeout(tryNextServer, 400); });
-            restore(v);
-          });
-          document.querySelectorAll('.watch-sources-section .source-row').forEach(function(row){
-            if(/streamtape|\bST\b/i.test(row.textContent||'')) row.dataset.neonSt='1';
-          });
-          var list=document.querySelector('.watch-sources-section .source-list');
-          if(list && !list.dataset.neonSorted){
-            list.dataset.neonSorted='1'; Array.from(list.children).sort(function(a,b){return (b.dataset.neonSt==='1')-(a.dataset.neonSt==='1');}).forEach(function(x){list.appendChild(x)});
-          }
-        }
-        window.addEventListener('pagehide',function(){document.querySelectorAll('.player-frame video').forEach(save)});
-        window.addEventListener('beforeunload',function(){document.querySelectorAll('.player-frame video').forEach(save)});
-        document.addEventListener('visibilitychange',function(){if(document.hidden)document.querySelectorAll('.player-frame video').forEach(save)});
-        var n=0; function tick(){wire();if(n++<80)setTimeout(tick,250)} tick();
-        new MutationObserver(wire).observe(document.documentElement,{childList:true,subtree:true});
-      })();</script>`;
-      const customLinkBridge = `<script>(function(){
-        if (location.pathname.indexOf('/watch/') !== 0) return;
-        var css = ''
-          + '.cl-bar{display:flex;align-items:center;gap:9px;padding:11px 14px;background:linear-gradient(90deg,rgba(255,42,191,.12),rgba(0,229,255,.08));border-block:1px solid rgba(0,229,255,.28);direction:rtl;flex-wrap:wrap;font:600 12px "IBM Plex Sans Arabic",Arial,sans-serif}'
-          + '.cl-bar svg{color:#21e6ff;flex:0 0 auto}'
-          + '.cl-bar-label{color:#ffe1f4;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase}'
-          + '.cl-input{flex:1 1 220px;min-width:200px;height:36px;padding:0 11px;background:rgba(5,8,15,.85);border:1px solid rgba(0,229,255,.35);color:#f3f6ff;font-family:monospace;font-size:12px}'
-          + '.cl-input::placeholder{color:rgba(155,181,194,.65)}'
-          + '.cl-input:focus{outline:none;border-color:#21e6ff;box-shadow:0 0 0 2px rgba(0,229,255,.18)}'
-          + '.cl-btn{height:36px;padding:0 13px;background:#ff2abf;color:#fff;border:0;cursor:pointer;font-size:11px;font-weight:700;letter-spacing:.03em}'
-          + '.cl-btn:hover{background:#ff5acf}'
-          + '.cl-btn:disabled{opacity:.5;cursor:wait}'
-          + '.cl-reset{background:transparent!important;color:#21e6ff!important;border:1px solid rgba(0,229,255,.35)!important}'
-          + '.cl-error{padding:8px 14px;color:#ff8aa3;font-size:11px;background:rgba(255,42,191,.07);border-block-end:1px solid rgba(255,42,191,.18);direction:rtl}'
-          + '.cl-meta{display:flex;align-items:center;gap:9px;flex-wrap:wrap;padding:8px 14px;color:#b5e0ea;font-size:11px;background:rgba(0,229,255,.06);border-block-end:1px solid rgba(0,229,255,.18);direction:rtl}'
-          + '.cl-meta b{color:#fff}'
-          + '.cl-meta .dot{color:rgba(255,255,255,.35)}'
-          + '.cl-meta a{display:inline-flex;align-items:center;gap:4px;color:#21e6ff;font-weight:600;text-decoration:none;margin-inline-start:auto}'
-          + '.cl-meta a:hover{color:#fff;text-decoration:underline}'
-          + '.cl-badge{display:inline-flex;align-items:center;gap:5px;padding:3px 8px;background:rgba(255,42,191,.22);border:1px solid rgba(255,42,191,.5);color:#ffe1f4;font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase}'
-          + '@media (max-width:720px){.cl-bar{gap:6px;padding:9px}.cl-bar-label{width:100%;font-size:10px}.cl-input{flex-basis:100%}}';
-        if (!document.getElementById('cl-style')) {
-          var s = document.createElement('style');
-          s.id = 'cl-style';
-          s.textContent = css;
-          document.head.appendChild(s);
-        }
-
-        function esc(s){var str=String(s==null?'':s);return str.replace(/[&<>]/g,function(c){return c==='&'?'&amp;':c==='<'?'&lt;':'&gt;'}).replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
-        function findFrame(){return document.querySelector('.player-frame')}
-        function progressKey(){var q=new URLSearchParams(location.search),a=(q.get('anime')||'').toLowerCase().replace(/\s+/g,' ').trim(),t=q.get('title')||'',n=(t.match(/(\d+)/)||[])[1]||'0';return 'neonflix:watch-progress:shared:'+a+':'+n}
-        function savePlayerProgress(player){if(!player||!Number.isFinite(player.currentTime)||player.currentTime<1)return;try{localStorage.setItem(progressKey(),JSON.stringify({time:player.currentTime,duration:Number(player.duration)||0,savedAt:Date.now()}))}catch(e){}}
-        function restorePlayerProgress(player){if(!player)return;try{var x=JSON.parse(localStorage.getItem(progressKey())||'null');if(!x||!Number.isFinite(x.time)||x.time<3)return;var apply=function(){var d=Number(player.duration)||0;if(!d||x.time<d-5)player.currentTime=x.time};if(player.readyState>=1)apply();else player.addEventListener('loadedmetadata',apply,{once:true})}catch(e){}}
-        function findTopline(frame){return frame && frame.querySelector('.player-topline')}
-
-        function clearCustom(frame){
-          var custom = frame.querySelector('.cl-custom-player');
-          if (custom) custom.remove();
-          frame.querySelectorAll('.cl-original-player').forEach(function(el){
-            el.classList.remove('cl-original-player');
-            el.style.display = '';
-          });
-          var ph = frame.querySelector('.player-placeholder');
-          if (ph) ph.style.display = '';
-          var meta = frame.querySelector('.cl-meta'); if (meta){meta.style.display='none';meta.innerHTML='';}
-          var err = frame.querySelector('.cl-error'); if (err){err.style.display='none';err.textContent='';}
-          var rb = frame.querySelector('.cl-reset'); if (rb) rb.remove();
-        }
-
-        function showError(frame, msg){
-          var err = frame.querySelector('.cl-error');
-          if (!err) return;
-          err.textContent = msg;
-          err.style.display = 'block';
-        }
-
-        function renderPlayer(frame, d){
-          var reactVideo = frame.querySelector('video.video-player');
-          var reactIframe = frame.querySelector('iframe.embed-player');
-          var placeholder = frame.querySelector('.player-placeholder');
-          if (reactVideo && !reactVideo.classList.contains('cl-original-player')){
-            reactVideo.classList.add('cl-original-player');
-            reactVideo.style.display = 'none';
-          }
-          if (reactIframe && !reactIframe.classList.contains('cl-original-player')){
-            reactIframe.classList.add('cl-original-player');
-            reactIframe.style.display = 'none';
-          }
-          if (placeholder) placeholder.style.display = 'none';
-          var prev = frame.querySelector('.cl-custom-player');
-          if (prev) prev.remove();
-
-          var player;
-          if (d.direct){
-            player = document.createElement('video');
-            player.className = 'video-player cl-custom-player';
-            player.controls = true;
-            player.playsInline = true;
-            player.setAttribute('webkit-playsinline','true');
-            player.src = d.url;
-            player.style.cssText = 'display:block;width:100%;max-height:650px;aspect-ratio:16/9;background:#020305';
-            player.addEventListener('loadedmetadata', function(){restorePlayerProgress(player)});
-            player.addEventListener('timeupdate', function(){savePlayerProgress(player)});
-            player.addEventListener('pause', function(){savePlayerProgress(player)});
-            player.addEventListener('ended', function(){try{localStorage.removeItem(progressKey())}catch(e){}});
-            window.addEventListener('pagehide', function(){savePlayerProgress(player)}, {once:false});
-            document.addEventListener('visibilitychange', function(){if(document.visibilityState==='hidden')savePlayerProgress(player)}, {once:false});
-            player.onerror = function(){ showError(frame, 'تعذر تشغيل الرابط المباشر. جرّب مصدرًا آخر.'); };
-          } else if (d.embedUrl){
-            player = document.createElement('iframe');
-            player.className = 'embed-player cl-custom-player';
-            player.src = d.embedUrl;
-            player.allow = 'autoplay; fullscreen; picture-in-picture; encrypted-media';
-            player.style.cssText = 'display:block;width:100%;min-height:520px;border:0;background:#05070d';
-          } else {
-            showError(frame, 'لا توجد صيغة قابلة للتشغيل لهذا الرابط.');
-            return;
-          }
-
-          var meta = frame.querySelector('.cl-meta');
-          if (meta && meta.nextSibling) frame.insertBefore(player, meta.nextSibling);
-          else frame.appendChild(player);
-        }
-
-        function showMeta(frame, d){
-          var meta = frame.querySelector('.cl-meta');
-          if (!meta) return;
-          meta.innerHTML = '';
-          meta.style.display = 'flex';
-          var prov = document.createElement('span');
-          prov.innerHTML = 'المزود: <b>' + esc(d.provider) + '</b>';
-          meta.appendChild(prov);
-          var dot1 = document.createElement('span'); dot1.className = 'dot'; dot1.textContent = '•';
-          meta.appendChild(dot1);
-          var kind = document.createElement('span');
-          kind.textContent = d.direct ? 'تشغيل مباشر' : 'إطار مضمّن';
-          meta.appendChild(kind);
-          if (d.hint){
-            var dot2 = document.createElement('span'); dot2.className = 'dot'; dot2.textContent = '•';
-            meta.appendChild(dot2);
-            var hint = document.createElement('span'); hint.textContent = d.hint;
-            meta.appendChild(hint);
-          }
-          if (!d.direct && d.embedUrl){
-            var a1 = document.createElement('a');
-            a1.href = d.embedUrl; a1.target = '_blank'; a1.rel = 'noreferrer';
-            a1.textContent = 'فتح في تبويب جديد ›';
-            meta.appendChild(a1);
-          }
-          if (d.direct){
-            var a2 = document.createElement('a');
-            a2.href = d.url; a2.target = '_blank'; a2.rel = 'noreferrer';
-            a2.textContent = '⬇ تحميل مباشر';
-            a2.download = '';
-            meta.appendChild(a2);
-          }
-          if (!frame.querySelector('.cl-reset')){
-            var rb = document.createElement('button');
-            rb.type = 'button';
-            rb.className = 'cl-btn cl-reset';
-            rb.textContent = '✕ إلغاء';
-            rb.style.marginInlineStart = '8px';
-            rb.onclick = function(){
-              var inp = frame.querySelector('.cl-input');
-              if (inp) inp.value = '';
-              clearCustom(frame);
-            };
-            var bar = frame.querySelector('.cl-bar');
-            if (bar) bar.appendChild(rb);
-          }
-        }
-
-        function inject(){
-          var frame = findFrame();
-          if (!frame) return;
-          if (frame.querySelector('.cl-bar')) return;
-
-          var bar = document.createElement('div');
-          bar.className = 'cl-bar';
-          bar.dir = 'rtl';
-          bar.innerHTML = ''
-            + '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 4V2"/><path d="M15 16v-2"/><path d="M8 9h2"/><path d="M20 9h2"/><path d="M17.8 11.8 19 13"/><path d="M15 9h0"/><path d="M17.8 6.2 19 5"/><path d="m3 21 9-9"/><path d="M12.2 6.2 11 5"/></svg>'
-            + '<span class="cl-bar-label">خدعة الرابط المخصّص</span>'
-            + '<input type="text" class="cl-input" placeholder="الصق أي رابط (mp4, m3u8, MediaFire, PixelDrain, StreamTape, StreamFiles…)" spellcheck="false" />'
-            + '<button type="button" class="cl-btn cl-play">▶ تشغيل</button>';
-
-          var errorBox = document.createElement('div');
-          errorBox.className = 'cl-error';
-          errorBox.style.display = 'none';
-
-          var metaBox = document.createElement('div');
-          metaBox.className = 'cl-meta';
-          metaBox.style.display = 'none';
-
-          var topline = findTopline(frame);
-          if (topline){
-            var ref = topline.nextSibling;
-            frame.insertBefore(bar, ref);
-            frame.insertBefore(errorBox, bar.nextSibling);
-            frame.insertBefore(metaBox, errorBox.nextSibling);
-          } else {
-            frame.insertBefore(bar, frame.firstChild);
-            frame.insertBefore(errorBox, bar.nextSibling);
-            frame.insertBefore(metaBox, errorBox.nextSibling);
-          }
-
-          var input = bar.querySelector('.cl-input');
-          var playBtn = bar.querySelector('.cl-play');
-
-          async function play(){
-            var raw = (input.value || '').trim();
-            if (!raw){ showError(frame, 'ألصق رابطًا صالحًا أولاً.'); return; }
-            if (!/^https?:/i.test(raw) || !/^https?:\\/\\//i.test(raw)){ showError(frame, 'الرابط يجب أن يبدأ بـ http:// أو https://'); return; }
-            playBtn.disabled = true;
-            playBtn.textContent = '⏳ جاري التحليل…';
-            errorBox.style.display = 'none';
-            try {
-              var r = await fetch('/api/video/direct?url=' + encodeURIComponent(raw));
-              var d = await r.json().catch(function(){ return null; });
-              if (!r.ok || !d || !d.ok){ throw new Error((d && d.error) || ('HTTP ' + r.status)); }
-              showMeta(frame, d);
-              renderPlayer(frame, d);
-            } catch (e){
-              showError(frame, e && e.message ? e.message : 'تعذر معالجة الرابط.');
-            } finally {
-              playBtn.disabled = false;
-              playBtn.textContent = '▶ تشغيل';
-            }
-          }
-
-          playBtn.onclick = play;
-          input.addEventListener('keydown', function(e){ if (e.key === 'Enter') play(); });
-        }
-
-        // Inject whenever the player-frame appears or its children change.
-        var tries = 0;
-        function tick(){
-          inject();
-          tries++;
-          if (tries < 60) setTimeout(tick, 250);
-        }
-        tick();
-        new MutationObserver(inject).observe(document.documentElement, { childList: true, subtree: true });
-      })();</script>`;
-
-      res.type("html").send(html.replace("</body>", `${localAuthBridge}${aliasBridge}${sourceBridge}${witcherEnhance}${kawaiiEnhance}${witcherHomeEnhance}${episodeNavigation}${historyNavigation}${sourceFallback}${legacyContext}${posterFixBridge}${favoriteRepairBridge}${watchReliabilityBridge}${customLinkBridge}</body>`));
+      const aliasBridge = `<script>(function(){var o1=document.getElementById('persistent-source-switcher');if(o1)o1.remove();var o2=document.getElementById('source-switcher');if(o2)o2.remove();var f=window.fetch;window.fetch=function(r,o){var u=String(r&&r.url||r||'');var p=[['/api/anime','/x/content'],['/api/witcher','/x/w'],['/api/kawaii','/x/kawaii'],['/api/animeify','/x/animeify'],['/api/animecloud','/x/animecloud'],['/api/faselhd','/x/faselhd'],['/api/episode','/x/episode'],['/api/auth','/x/auth']];p.forEach(function(x){if(u.indexOf(x[0])===0)u=x[1]+u.slice(x[0].length)});var sm=localStorage.getItem('neonflix-source')||'cluster';if(u.indexOf('/api/trpc/anime.')===0&&u.indexOf('source=')<0){u+=(u.indexOf('?')>=0?'&':'?')+'source='+encodeURIComponent(sm)}if(u!==String(r&&r.url||r||''))r=u;return f.call(this,r,o)};})();</script>`;
+      res.type("html").send(html.replace("</body>", `${aliasBridge}</body>`));
     } else {
       res.status(404).send("مجلد dist غير موجود");
     }

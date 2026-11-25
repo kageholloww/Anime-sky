@@ -3,7 +3,7 @@ import { COOKIE_NAME } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
-import { discoverGenres, getDetails, getEpisodeSources, getRandomByGenre, getSeasons, listLatest, searchAnime } from "./animeApi";
+import { discoverGenres, getDetails, getEpisodeSources, getRandomByGenre, getSeasons, listByGenre, listLatest, searchAnime } from "./animeApi";
 import { listFavorites, listHistory, removeFavorite, saveFavorite, saveHistory } from "./db";
 
 const apiError = (error: unknown) => new Error(error instanceof Error ? error.message : "ANIME_API_ERROR");
@@ -33,7 +33,7 @@ export const appRouter = router({
   }),
   anime: router({
     latest: publicProcedure
-      .input(z.object({ genreId: z.string().default("18"), start: z.number().int().min(0).default(0), limit: z.number().int().min(1).max(30).default(12) }).optional())
+      .input(z.object({ genreId: z.string().default("18"), start: z.number().int().min(0).default(0), limit: z.number().int().min(1).max(80).default(12) }).optional())
       .query(async ({ input }) => {
         try { return await listLatest(input?.start ?? 0, input?.limit ?? 12, input?.genreId ?? "18"); }
         catch (error) { throw apiError(error); }
@@ -57,7 +57,7 @@ export const appRouter = router({
         catch (error) { throw apiError(error); }
       }),
     episodeSources: publicProcedure
-      .input(z.object({ episodeId: z.string().min(1) }))
+      .input(z.object({ episodeId: z.string().min(1), contentId: z.string().optional() }))
       .query(async ({ input }) => {
         try { return await getEpisodeSources(input.episodeId); }
         catch (error) { throw apiError(error); }
@@ -66,6 +66,12 @@ export const appRouter = router({
       try { return await discoverGenres(); }
       catch (error) { throw apiError(error); }
     }),
+    byGenre: publicProcedure
+      .input(z.object({ genre: z.string().trim().min(1), start: z.number().int().min(0).default(0), limit: z.number().int().min(1).max(80).default(30) }))
+      .query(async ({ input }) => {
+        try { return await listByGenre(input.genre, input.start, input.limit); }
+        catch (error) { throw apiError(error); }
+      }),
     random: publicProcedure
       .input(z.object({ genres: z.array(z.string()).max(20).optional(), genre: z.string().optional(), genreId: z.string().optional() }).optional())
       .query(async ({ input }) => {

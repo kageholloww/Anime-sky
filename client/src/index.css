@@ -386,6 +386,8 @@ a { color: inherit; text-decoration: none; }
 .provider-mega { border-color: rgba(255, 70, 130, .65); color: #ff70a7; background: rgba(255,70,130,.1); }
 .provider-mp4upload { border-color: rgba(255, 42, 191, .65); color: #ff75d4; background: rgba(255,42,191,.1); }
 .provider-uqload, .provider-voe { border-color: rgba(152, 107, 255, .65); color: #c4a8ff; background: rgba(152,107,255,.1); }
+.provider-animecloud { border-color: rgba(56, 189, 248, .65); color: #7dd3fc; background: rgba(56,189,248,.12); }
+.provider-faselhd { border-color: rgba(244, 63, 94, .65); color: #fda4af; background: rgba(244,63,94,.12); }
 .download-source-row { border-color: rgba(255,42,191,.18); }
 .download-source-row .source-select { cursor: default; }
 @media (max-width: 720px) { .embed-player { min-height: 360px; } .source-row { align-items: flex-start; flex-wrap: wrap; gap: 12px; } .source-actions { width: 100%; justify-content: flex-end; } }
@@ -424,8 +426,13 @@ a { color: inherit; text-decoration: none; }
 .suggested-watch-btn:hover { background: #62f2ff; box-shadow: 0 0 20px rgba(0,229,255,.4); transform: translateY(-1px); }
 
 /* Mobile App Native UI Utilities */
+html, body {
+  background-color: #060814;
+  overscroll-behavior-y: contain;
+  -webkit-tap-highlight-color: transparent;
+}
 .no-scrollbar::-webkit-scrollbar { display: none; }
 .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
-.pb-safe { padding-bottom: max(16px, env(safe-area-inset-bottom)); }
-.pt-safe { padding-top: max(12px, env(safe-area-inset-top)); }
+.pb-safe { padding-bottom: max(16px, env(safe-area-inset-bottom, 16px)); }
+.pt-safe { padding-top: max(14px, env(safe-area-inset-top, 14px)); }
 

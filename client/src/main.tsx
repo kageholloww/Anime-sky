@@ -43,6 +43,13 @@ const trpcClient = trpc.createClient({
       url: "/api/trpc",
       transformer: superjson,
       headers() {
+        const out: Record<string, string> = {};
+        try {
+          const src = localStorage.getItem("neonflix-source") || "cluster";
+          out["x-anime-source"] = src;
+        } catch {
+          // localStorage unavailable
+        }
         // Preview auto-login fallback: when the browser blocks iframe cookies
         // (Safari ITP / private browsing / WebView), the runtime mirrors the
         // session into sessionStorage so we can forward it as a Bearer token.
@@ -54,16 +61,25 @@ const trpcClient = trpc.createClient({
             const pair = raw.split(";").find(s => s.trim().startsWith(prefix));
             const token = pair?.trim().slice(prefix.length);
             if (token) {
-              return { Authorization: `Bearer ${token}` };
+              out["Authorization"] = `Bearer ${token}`;
             }
           }
         } catch {
           // sessionStorage unavailable
         }
-        return {};
+        return out;
       },
       fetch(input, init) {
-        return globalThis.fetch(input, {
+        let url = typeof input === "string" ? input : input instanceof Request ? input.url : String(input);
+        try {
+          const src = localStorage.getItem("neonflix-source") || "cluster";
+          if (url.includes("/api/trpc/anime.") && !url.includes("source=")) {
+            url += (url.includes("?") ? "&" : "?") + `source=${encodeURIComponent(src)}`;
+          }
+        } catch {
+          // localStorage unavailable
+        }
+        return globalThis.fetch(url, {
           ...(init ?? {}),
           credentials: "include",
         });

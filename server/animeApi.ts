@@ -800,6 +800,37 @@ async function inspectDetailsInBatches(cards: AnimeCard[], batchSize = 6): Promi
   return details;
 }
 
+export async function listByGenre(genre: string, start = 0, limit = 30): Promise<AnimeCard[]> {
+  const def = findKnownGenre(genre);
+  if (isConfigured() && def) {
+    try {
+      const items = await searchContentInternal({
+        start: String(start),
+        limit: String(limit),
+        order_by: "created_at",
+        order_direction: "DESC",
+        genre_id: def.id,
+      });
+      if (items.length > 0) return items;
+    } catch (error) {
+      console.warn("[Anime API] listByGenre error, using fallback catalog:", error);
+    }
+  }
+  return FALLBACK_ANIMES.filter(item => doesAnimeHaveGenre(item.genres, genre))
+    .slice(start, start + limit)
+    .map(item => ({
+      id: item.id,
+      title: item.title,
+      englishTitle: item.englishTitle,
+      poster: item.poster,
+      year: item.year,
+      rating: item.rating,
+      episodes: item.episodes,
+      airingDay: item.airingDay,
+      genres: item.genres,
+    }));
+}
+
 export async function discoverGenres(): Promise<string[]> {
   return KNOWN_GENRES.map(g => g.name);
 }

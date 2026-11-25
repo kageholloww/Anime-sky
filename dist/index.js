@@ -1772,6 +1772,34 @@ async function inspectDetailsInBatches(cards, batchSize = 6) {
   }
   return details;
 }
+async function listByGenre(genre, start = 0, limit = 30) {
+  const def = findKnownGenre(genre);
+  if (isConfigured() && def) {
+    try {
+      const items = await searchContentInternal({
+        start: String(start),
+        limit: String(limit),
+        order_by: "created_at",
+        order_direction: "DESC",
+        genre_id: def.id
+      });
+      if (items.length > 0) return items;
+    } catch (error) {
+      console.warn("[Anime API] listByGenre error, using fallback catalog:", error);
+    }
+  }
+  return FALLBACK_ANIMES.filter((item) => doesAnimeHaveGenre(item.genres, genre)).slice(start, start + limit).map((item) => ({
+    id: item.id,
+    title: item.title,
+    englishTitle: item.englishTitle,
+    poster: item.poster,
+    year: item.year,
+    rating: item.rating,
+    episodes: item.episodes,
+    airingDay: item.airingDay,
+    genres: item.genres
+  }));
+}
 async function discoverGenres() {
   return KNOWN_GENRES.map((g) => g.name);
 }
@@ -1915,7 +1943,7 @@ var appRouter = router({
     saveHistory: protectedProcedure.input(z2.object({ contentId: z2.string().min(1), animeTitle: z2.string().min(1), episodeId: z2.string().min(1), episodeTitle: z2.string().min(1) })).mutation(({ ctx, input }) => saveHistory(ctx.user.id, input.contentId, input.animeTitle, input.episodeId, input.episodeTitle))
   }),
   anime: router({
-    latest: publicProcedure.input(z2.object({ genreId: z2.string().default("18"), start: z2.number().int().min(0).default(0), limit: z2.number().int().min(1).max(30).default(12) }).optional()).query(async ({ input }) => {
+    latest: publicProcedure.input(z2.object({ genreId: z2.string().default("18"), start: z2.number().int().min(0).default(0), limit: z2.number().int().min(1).max(80).default(12) }).optional()).query(async ({ input }) => {
       try {
         return await listLatest(input?.start ?? 0, input?.limit ?? 12, input?.genreId ?? "18");
       } catch (error) {
@@ -1943,7 +1971,7 @@ var appRouter = router({
         throw apiError(error);
       }
     }),
-    episodeSources: publicProcedure.input(z2.object({ episodeId: z2.string().min(1) })).query(async ({ input }) => {
+    episodeSources: publicProcedure.input(z2.object({ episodeId: z2.string().min(1), contentId: z2.string().optional() })).query(async ({ input }) => {
       try {
         return await getEpisodeSources(input.episodeId);
       } catch (error) {
@@ -1953,6 +1981,13 @@ var appRouter = router({
     genres: publicProcedure.query(async () => {
       try {
         return await discoverGenres();
+      } catch (error) {
+        throw apiError(error);
+      }
+    }),
+    byGenre: publicProcedure.input(z2.object({ genre: z2.string().trim().min(1), start: z2.number().int().min(0).default(0), limit: z2.number().int().min(1).max(80).default(30) })).query(async ({ input }) => {
+      try {
+        return await listByGenre(input.genre, input.start, input.limit);
       } catch (error) {
         throw apiError(error);
       }
